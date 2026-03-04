@@ -146,18 +146,7 @@ class DDPM(pl.LightningModule):
         self.logger_version = None
 
         self.label_indices_total = None
-        self.metrics_buffer = {
-            "val/kullback_leibler_divergence_sigmoid": 15.0,
-            "val/kullback_leibler_divergence_softmax": 10.0,
-            "val/psnr": 0.0,
-            "val/ssim": 0.0,
-            "val/inception_score_mean": 1.0,
-            "val/inception_score_std": 0.0,
-            "val/kernel_inception_distance_mean": 0.0,
-            "val/kernel_inception_distance_std": 0.0,
-            "val/frechet_inception_distance": 133.0,
-            "val/frechet_audio_distance": 32.0,
-        }
+        self.metrics_buffer = {}
         self.initial_learning_rate = None
         self.test_data_subset_path = None
     
@@ -416,10 +405,19 @@ class DDPM(pl.LightningModule):
         if self.use_ema:
             self.model_ema(self.model)
 
+    @staticmethod
+    def _si_sdr_batch(ref, est):
+        ref = ref - ref.mean(dim=-1, keepdim=True)
+        est = est - est.mean(dim=-1, keepdim=True)
+        dot = (ref * est).sum(dim=-1, keepdim=True)
+        s_target = dot * ref / (ref.pow(2).sum(dim=-1, keepdim=True) + 1e-8)
+        e_noise = est - s_target
+        return 10 * torch.log10(s_target.pow(2).sum(dim=-1) / (e_noise.pow(2).sum(dim=-1) + 1e-8) + 1e-8)
+
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         name = self.get_validation_folder_name()
-        self.generate_sample(
+        waveform = self.generate_sample(
             [batch],
             name=name,
             unconditional_guidance_scale=self.evaluation_params[
@@ -429,6 +427,34 @@ class DDPM(pl.LightningModule):
             n_gen=self.evaluation_params["n_candidates_per_samples"],
         )
         loss, loss_dict = self.shared_step(batch)
+
+        if waveform is not None:
+            try:
+                pred = torch.from_numpy(waveform).float()
+                if pred.ndim == 3:
+                    pred = pred.squeeze(1)
+                ref = batch["waveform"].cpu().float()
+                if ref.ndim == 3:
+                    ref = ref.squeeze(1)
+                min_len = min(pred.shape[-1], ref.shape[-1])
+                ref_t, pred_t = ref[..., :min_len], pred[..., :min_len]
+                si_sdr_val = self._si_sdr_batch(ref_t, pred_t).mean()
+                loss_dict["val/si_sdr"] = si_sdr_val.item()
+                try:
+                    from pesq import pesq as pesq_fn
+                    pesq_scores = []
+                    for i in range(ref_t.shape[0]):
+                        r = ref_t[i].numpy().astype(np.float64)
+                        e = pred_t[i].numpy().astype(np.float64)
+                        if self.sampling_rate != 16000:
+                            r = torchaudio.functional.resample(torch.from_numpy(r), self.sampling_rate, 16000).numpy()
+                            e = torchaudio.functional.resample(torch.from_numpy(e), self.sampling_rate, 16000).numpy()
+                        pesq_scores.append(pesq_fn(16000, r.astype(np.float32), e.astype(np.float32), "wb"))
+                    loss_dict["val/pesq"] = float(np.mean(pesq_scores))
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         self.log_dict(
         {k: float(v) for k, v in loss_dict.items()},
