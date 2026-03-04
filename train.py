@@ -1,0 +1,216 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+import argparse
+import yaml
+import torch
+import numpy as np
+import logging
+from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning.strategies.ddp import DDPStrategy
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import WandbLogger
+
+from data.wds_datamodule import WDSDataModule
+from utils.audio import TacotronSTFT, get_mel_from_wav
+from utils.tools import get_restore_step, instantiate_from_config
+
+logging.getLogger('fsspec').setLevel(logging.ERROR)
+logging.getLogger('numba').setLevel(logging.WARNING)
+
+
+def build_stft_tool(config):
+    return TacotronSTFT(
+        config["preprocessing"]["stft"]["filter_length"],
+        config["preprocessing"]["stft"]["hop_length"],
+        config["preprocessing"]["stft"]["win_length"],
+        config["preprocessing"]["mel"]["n_mel_channels"],
+        config["preprocessing"]["audio"]["sampling_rate"],
+        config["preprocessing"]["mel"]["mel_fmin"],
+        config["preprocessing"]["mel"]["mel_fmax"],
+    )
+
+
+def wav_feature_extraction(waveform, stft_tool):
+    if waveform.dim() == 3:
+        waveform = waveform.squeeze(1)
+    if waveform.dim() == 1:
+        waveform = waveform.unsqueeze(0)
+    log_mel_specs, stfts = [], []
+    for i in range(waveform.shape[0]):
+        wav_tensor = torch.FloatTensor(waveform[i].numpy() if isinstance(waveform[i], torch.Tensor) else waveform[i])
+        log_mel_spec, stft, energy = get_mel_from_wav(wav_tensor, stft_tool)
+        log_mel_specs.append(torch.FloatTensor(log_mel_spec.T))
+        stfts.append(torch.FloatTensor(stft.T))
+    return torch.stack(log_mel_specs, dim=0), torch.stack(stfts, dim=0)
+
+
+def pad_spec(spec, target_length):
+    n_frames = spec.shape[1]
+    p = target_length - n_frames
+    if p > 0:
+        spec = torch.nn.ZeroPad2d((0, 0, 0, p))(spec)
+    elif p < 0:
+        spec = spec[:, :target_length, :]
+    if spec.size(-1) % 2 != 0:
+        spec = spec[..., :-1]
+    return spec
+
+
+def convert_wds_batch_to_model_format(batch, config, stft_tool):
+    mix_audio = batch["mix"]
+    sources_audio = batch["sources"]
+    labels = batch["labels"]
+    batch_size = mix_audio.shape[0]
+
+    if sources_audio.ndim == 4 and sources_audio.shape[1] > 0:
+        target_audio = sources_audio[:, 0, :, :]
+    else:
+        target_audio = mix_audio
+
+    if target_audio.shape[1] > 1:
+        target_audio = target_audio.mean(dim=1, keepdim=True)
+    if mix_audio.shape[1] > 1:
+        mix_audio_mono = mix_audio.mean(dim=1, keepdim=True)
+    else:
+        mix_audio_mono = mix_audio
+
+    sampling_rate = config["preprocessing"]["audio"]["sampling_rate"]
+    hopsize = config["preprocessing"]["stft"]["hop_length"]
+    duration = config["preprocessing"]["audio"]["duration"]
+    target_length = int(duration * sampling_rate / hopsize)
+
+    log_mel_spec, stft = wav_feature_extraction(target_audio, stft_tool)
+    log_mel_spec = pad_spec(log_mel_spec, target_length)
+    stft = pad_spec(stft, target_length)
+
+    mixed_mel, _ = wav_feature_extraction(mix_audio_mono, stft_tool)
+    mixed_mel = pad_spec(mixed_mel, target_length)
+
+    text_list = []
+    for i in range(batch_size):
+        if len(labels[i]) > 0:
+            text = labels[i][0] if isinstance(labels[i][0], str) else ""
+        else:
+            text = ""
+        text_list.append(text)
+
+    return {
+        "fname": [f"batch_item_{i}.wav" for i in range(batch_size)],
+        "text": text_list,
+        "label_vector": torch.zeros(batch_size, 0),
+        "waveform": target_audio,
+        "stft": stft,
+        "log_mel_spec": log_mel_spec,
+        "duration": duration,
+        "sampling_rate": sampling_rate,
+        "random_start_sample_in_original_audio_file": 0,
+        "mixed_waveform": mix_audio_mono,
+        "mixed_mel": mixed_mel,
+        "caption": text_list,
+    }
+
+
+class WrappedDataLoader:
+    def __init__(self, base_loader, config, stft_tool):
+        self.base_loader = base_loader
+        self.config = config
+        self.stft_tool = stft_tool
+
+    def __iter__(self):
+        for batch in self.base_loader:
+            yield convert_wds_batch_to_model_format(batch, self.config, self.stft_tool)
+
+    def __len__(self):
+        return len(self.base_loader)
+
+
+def main(configs, config_yaml_path, exp_group_name, exp_name):
+    if "seed" in configs.keys():
+        seed_everything(configs["seed"])
+    else:
+        seed_everything(0)
+    if "precision" in configs.keys():
+        torch.set_float32_matmul_precision(configs["precision"])
+
+    log_path = configs["log_directory"]
+    exp_group_name = configs["exp_group"]
+    exp_name = configs["exp_name"]
+    batch_size = configs["model"]["params"]["batchsize"]
+
+    datamodule = WDSDataModule(**configs["datamodule"]["data_config"])
+    train_loader, val_loader, test_loader = datamodule.make_loader
+
+    stft_tool = build_stft_tool(configs)
+    loader = WrappedDataLoader(train_loader, configs, stft_tool)
+    val_loader = WrappedDataLoader(val_loader, configs, stft_tool)
+
+    device_count = torch.cuda.device_count()
+    config_reload_from_ckpt = configs.get("reload_from_ckpt")
+    limit_val_batches = configs.get("step", {}).get("limit_val_batches")
+
+    save_checkpoint_every_n_steps = configs["step"]["save_checkpoint_every_n_steps"]
+    max_steps = configs["step"]["max_steps"]
+    save_top_k = configs["step"]["save_top_k"]
+
+    checkpoint_path = os.path.join(log_path, exp_group_name, exp_name, "checkpoints")
+    wandb_path = os.path.join(log_path, exp_group_name, exp_name)
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=checkpoint_path,
+        monitor="global_step",
+        mode="max",
+        filename="checkpoint-global_step={global_step:.0f}",
+        every_n_train_steps=save_checkpoint_every_n_steps,
+        save_top_k=save_top_k,
+        auto_insert_metric_name=False,
+        save_last=True,
+    )
+
+    os.makedirs(checkpoint_path, exist_ok=True)
+
+    if len(os.listdir(checkpoint_path)) > 0:
+        restore_step, _ = get_restore_step(checkpoint_path)
+        resume_from_checkpoint = os.path.join(checkpoint_path, restore_step)
+    elif config_reload_from_ckpt is not None:
+        resume_from_checkpoint = config_reload_from_ckpt
+    else:
+        resume_from_checkpoint = None
+
+    latent_diffusion = instantiate_from_config(configs["model"])
+    if hasattr(latent_diffusion, 'set_log_dir'):
+        latent_diffusion.set_log_dir(log_path, exp_group_name, exp_name)
+
+    wandb_logger = WandbLogger(project=exp_group_name, name=exp_name, save_dir=wandb_path, config=configs)
+
+    trainer = Trainer(
+        accelerator="gpu",
+        devices=device_count,
+        logger=wandb_logger,
+        max_steps=max_steps,
+        num_sanity_val_steps=0,
+        limit_val_batches=limit_val_batches,
+        limit_train_batches=10000,
+        strategy=DDPStrategy(find_unused_parameters=True),
+        callbacks=[checkpoint_callback],
+    )
+
+    trainer.fit(latent_diffusion, loader, val_loader, ckpt_path=resume_from_checkpoint)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config_yaml", type=str, default="configs/flowsep/flowsep.yaml", help="path to config")
+    args = parser.parse_args()
+
+    assert torch.cuda.is_available(), "CUDA is not available"
+
+    config_yaml_path = args.config_yaml
+    exp_name = os.path.basename(config_yaml_path.split(".")[0])
+    exp_group_name = os.path.basename(os.path.dirname(config_yaml_path))
+
+    with open(config_yaml_path, "r") as f:
+        configs = yaml.load(f, Loader=yaml.FullLoader)
+
+    main(configs, config_yaml_path, exp_group_name, exp_name)
