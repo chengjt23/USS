@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "flowsep"
+exp_name: "data_pred"
 project: "USS"
 precision: "medium"
 
@@ -20,7 +20,7 @@ datamodule:
 step:
   validation_every_n_epochs: 1
   save_checkpoint_every_n_steps: 100000
-  max_steps: 4000000
+  max_steps: 300000
   save_top_k: 4
 
 preprocessing:
@@ -65,6 +65,7 @@ model:
     retrival_num: 0
     use_clap: false
     euler: true
+    data_prediction: true
     unet_config:
       target: models.flowsep.unet.UNetModel
       params:

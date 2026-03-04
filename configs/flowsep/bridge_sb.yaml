@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "flowsep"
+exp_name: "bridge_sb"
 project: "USS"
 precision: "medium"
 
@@ -20,7 +20,7 @@ datamodule:
 step:
   validation_every_n_epochs: 1
   save_checkpoint_every_n_steps: 100000
-  max_steps: 4000000
+  max_steps: 2000000
   save_top_k: 4
 
 preprocessing:
@@ -65,6 +65,11 @@ model:
     retrival_num: 0
     use_clap: false
     euler: true
+    bridge_mode: true
+    sb_schedule: true
+    sb_rho: 1.0
+    data_prediction: true
+    use_ei_solver: true
     unet_config:
       target: models.flowsep.unet.UNetModel
       params:
