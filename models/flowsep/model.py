@@ -414,6 +414,50 @@ class DDPM(pl.LightningModule):
         e_noise = est - s_target
         return 10 * torch.log10(s_target.pow(2).sum(dim=-1) / (e_noise.pow(2).sum(dim=-1) + 1e-8) + 1e-8)
 
+    @staticmethod
+    def _mel_embedding(wav, sr=16000, n_mels=128, n_fft=1024, hop=160):
+        mel_fn = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sr, n_fft=n_fft, hop_length=hop, n_mels=n_mels
+        )
+        mel = mel_fn(wav)
+        log_mel = torch.log(mel.clamp(min=1e-7))
+        return log_mel.mean(dim=-1)
+
+    def _get_vggish(self):
+        if not hasattr(self, "_vggish_model"):
+            self._vggish_model = torch.hub.load('harritaylor/torchvggish', 'vggish')
+            self._vggish_model.eval()
+            self._vggish_model.postprocess = False
+        return self._vggish_model
+
+    def _extract_fad_embedding(self, wav, sr):
+        vggish = self._get_vggish()
+        wav_16k = wav
+        if sr != 16000:
+            wav_16k = torchaudio.functional.resample(wav, sr, 16000)
+        embs = []
+        for i in range(wav_16k.shape[0]):
+            with torch.no_grad():
+                emb = vggish.forward(wav_16k[i].numpy(), 16000)
+            embs.append(emb.mean(0))
+        return torch.stack(embs)
+
+    @staticmethod
+    def _frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
+        from scipy.linalg import sqrtm
+        mu1, mu2 = mu1.numpy(), mu2.numpy()
+        sigma1 = sigma1.numpy() + eps * np.eye(sigma1.shape[0])
+        sigma2 = sigma2.numpy() + eps * np.eye(sigma2.shape[0])
+        diff = mu1 - mu2
+        covmean, _ = sqrtm(sigma1 @ sigma2, disp=False)
+        if np.iscomplexobj(covmean):
+            covmean = covmean.real
+        return float(diff @ diff + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean))
+
+    def on_validation_epoch_start(self):
+        self._fad_ref_embs = []
+        self._fad_pred_embs = []
+
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         name = self.get_validation_folder_name()
@@ -453,6 +497,9 @@ class DDPM(pl.LightningModule):
                     loss_dict["val/pesq"] = float(np.mean(pesq_scores))
                 except Exception:
                     pass
+                if hasattr(self, "_fad_ref_embs"):
+                    self._fad_ref_embs.append(self._extract_fad_embedding(ref_t, sr=self.sampling_rate))
+                    self._fad_pred_embs.append(self._extract_fad_embedding(pred_t, sr=self.sampling_rate))
             except Exception:
                 pass
 
@@ -463,6 +510,21 @@ class DDPM(pl.LightningModule):
         on_step=True,
         on_epoch=True,
         )
+
+    def on_validation_epoch_end(self):
+        if hasattr(self, "_fad_ref_embs") and len(self._fad_ref_embs) > 1:
+            try:
+                ref_all = torch.cat(self._fad_ref_embs, dim=0)
+                pred_all = torch.cat(self._fad_pred_embs, dim=0)
+                mu_r, mu_p = ref_all.mean(0), pred_all.mean(0)
+                sigma_r = torch.cov(ref_all.T)
+                sigma_p = torch.cov(pred_all.T)
+                fad = self._frechet_distance(mu_r, sigma_r, mu_p, sigma_p)
+                self.log("val/fad", fad, prog_bar=False, logger=True)
+            except Exception:
+                pass
+        self._fad_ref_embs = []
+        self._fad_pred_embs = []
 
     def get_validation_folder_name(self):
         return "val_%s_cfg_scale_%s_ddim_%s_n_cand_%s" % (self.global_step, self.evaluation_params["unconditional_guidance_scale"], self.evaluation_params["ddim_sampling_steps"], self.evaluation_params["n_candidates_per_samples"])
