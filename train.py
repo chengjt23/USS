@@ -1,7 +1,8 @@
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 import argparse
 import yaml
 import torch
@@ -133,6 +134,8 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
         seed_everything(0)
     if "precision" in configs.keys():
         torch.set_float32_matmul_precision(configs["precision"])
+    else:
+        torch.set_float32_matmul_precision("medium")
 
     log_path = configs["log_directory"]
     exp_group_name = configs["exp_group"]
@@ -192,6 +195,7 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
         num_sanity_val_steps=0,
         limit_val_batches=limit_val_batches,
         limit_train_batches=10000,
+        precision="bf16-mixed",
         strategy=DDPStrategy(find_unused_parameters=True),
         callbacks=[checkpoint_callback],
     )

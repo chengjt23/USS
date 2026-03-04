@@ -514,6 +514,11 @@ class LatentDiffusion(DDPM):
         use_clap=False,
         sigma_min=1e-4,
         euler=False,
+        bridge_mode=False,
+        sb_schedule=False,
+        sb_rho=1.0,
+        data_prediction=False,
+        use_ei_solver=False,
         *args,
         **kwargs,
     ):
@@ -527,6 +532,11 @@ class LatentDiffusion(DDPM):
         self.evaluation_params = evaluation_params
         self.sigma_min = sigma_min
         self.euler = euler
+        self.bridge_mode = bridge_mode
+        self.sb_schedule = sb_schedule
+        self.sb_rho = sb_rho
+        self.data_prediction = data_prediction
+        self.use_ei_solver = use_ei_solver
         assert self.num_timesteps_cond <= kwargs["timesteps"]
 
         if conditioning_key is None:
@@ -956,8 +966,23 @@ class LatentDiffusion(DDPM):
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         spr_t = t.view(-1, 1, 1, 1)
-        x_noisy = (1 - (1 - self.sigma_min) * spr_t) * noise + spr_t * x_start
-        target = x_start - (1 - self.sigma_min) * noise
+
+        if self.bridge_mode and channel != self.channels:
+            if self.sb_schedule:
+                sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
+                x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + sigma_bb * noise
+            else:
+                x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + self.sigma_min * noise
+            target = x_start if self.data_prediction else x_start - x_extra
+        elif self.sb_schedule:
+            sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
+            noise_extra = torch.randn_like(x_start)
+            x_noisy = (1 - (1 - self.sigma_min) * spr_t) * noise + spr_t * x_start + sigma_bb * noise_extra
+            target = x_start if self.data_prediction else x_start - (1 - self.sigma_min) * noise
+        else:
+            x_noisy = (1 - (1 - self.sigma_min) * spr_t) * noise + spr_t * x_start
+            target = x_start if self.data_prediction else x_start - (1 - self.sigma_min) * noise
+
         if channel != self.channels:
             x_noisy = torch.cat([x_noisy, x_extra], dim=1)
 
@@ -1042,6 +1067,21 @@ class LatentDiffusion(DDPM):
             except:
                 sf.write(path, waveform[i], samplerate=self.sampling_rate)
 
+    def _model_forward(self, x, t_batch, cond, x_T):
+        if self.extra_channels and x_T is not None:
+            out = self.apply_model(torch.cat([x, x_T], dim=1), t_batch, cond)
+            return out[:, :self.channels]
+        return self.apply_model(x, t_batch, cond)
+
+    def _to_velocity(self, model_out, x, t, x_T):
+        if not self.data_prediction:
+            return model_out
+        if self.bridge_mode and x_T is not None:
+            return model_out - x_T
+        spr_t = t.view(-1, 1, 1, 1)
+        denom = 1 - (1 - self.sigma_min) * spr_t + 1e-8
+        return (model_out - (1 - self.sigma_min) * x) / denom
+
     def solve_euler(self, n_timesteps, batch_size, shape, cond=None, unconditional_guidance_scale=1.0, unconditional_conditioning=None, x_T=None, temperature=1.0, spks=None):
         if len(shape) == 3:
             C, H, W = shape
@@ -1050,28 +1090,64 @@ class LatentDiffusion(DDPM):
             C, L = shape
             size = (batch_size, C, L)
 
-        x = torch.randn(size, device=self.device) * temperature
-        
-        t_span = torch.linspace(0, 1, n_timesteps + 1, device=self.device)
+        if self.bridge_mode and x_T is not None:
+            x = x_T.clone()
+        else:
+            x = torch.randn(size, device=self.device) * temperature
 
+        t_span = torch.linspace(0, 1, n_timesteps + 1, device=self.device)
         t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
 
-        sol = []
-
         for step in tqdm(range(1, len(t_span))):
-            if self.extra_channels:
-                dphi_dt = self.apply_model(torch.cat([x, x_T], dim=1), t.view(1).expand(batch_size), cond)
-                dphi_dt = dphi_dt[:, :self.channels]
-            else:
-                dphi_dt = self.apply_model(x, t.view(1).expand(batch_size), cond)
-
+            t_batch = t.view(1).expand(batch_size)
+            model_out = self._model_forward(x, t_batch, cond, x_T)
+            dphi_dt = self._to_velocity(model_out, x, t_batch, x_T)
             x = x + dt * dphi_dt
             t = t + dt
-            sol.append(x)
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
-            
-        return sol[-1]
+
+        return x
+
+    def solve_ei(self, n_timesteps, batch_size, shape, cond=None, unconditional_guidance_scale=1.0, unconditional_conditioning=None, x_T=None, temperature=1.0, spks=None):
+        if len(shape) == 3:
+            C, H, W = shape
+            size = (batch_size, C, H, W)
+        else:
+            C, L = shape
+            size = (batch_size, C, L)
+
+        if self.bridge_mode and x_T is not None:
+            x = x_T.clone()
+        else:
+            x = torch.randn(size, device=self.device) * temperature
+
+        t_span = torch.linspace(0, 1, n_timesteps + 1, device=self.device)
+        rho = self.sb_rho
+
+        for step in range(1, len(t_span)):
+            t_prev = t_span[step - 1]
+            t_curr = t_span[step]
+            t_batch = t_prev.view(1).expand(batch_size)
+            model_out = self._model_forward(x, t_batch, cond, x_T)
+
+            if self.bridge_mode and self.sb_schedule and self.data_prediction and x_T is not None:
+                rho_p = rho * torch.sqrt(t_prev + 1e-8)
+                rho_c = rho * torch.sqrt(t_curr + 1e-8)
+                rho_T = rho
+                rho_bar_p = torch.sqrt(rho_T ** 2 - rho_p ** 2 + 1e-8)
+                rho_bar_c = torch.sqrt(rho_T ** 2 - rho_c ** 2 + 1e-8)
+
+                w_x = (rho_c * rho_bar_c / (rho_p * rho_bar_p + 1e-8)).view(1, 1, 1, 1)
+                w_s = ((rho_bar_c ** 2 - rho_bar_p * rho_c * rho_bar_c / (rho_p + 1e-8)) / (rho_T ** 2 + 1e-8)).view(1, 1, 1, 1)
+                w_y = ((rho_c ** 2 - rho_p * rho_c * rho_bar_c / (rho_bar_p + 1e-8)) / (rho_T ** 2 + 1e-8)).view(1, 1, 1, 1)
+                x = w_x * x + w_s * model_out + w_y * x_T
+            else:
+                dphi_dt = self._to_velocity(model_out, x, t_batch, x_T)
+                dt = t_curr - t_prev
+                x = x + dt * dphi_dt
+
+        return x
 
     @torch.no_grad()
     def sample_log(
@@ -1093,9 +1169,9 @@ class LatentDiffusion(DDPM):
             shape = (self.channels, self.latent_t_size, self.latent_f_size)
 
         intermediate = None
-        euler_step = ddim_steps
-        samples = self.solve_euler(
-            euler_step,
+        solver_fn = self.solve_ei if self.use_ei_solver else self.solve_euler
+        samples = solver_fn(
+            ddim_steps,
             batch_size,
             shape,
             cond,
