@@ -425,7 +425,7 @@ class DDPM(pl.LightningModule):
 
     def _get_vggish(self):
         if not hasattr(self, "_vggish_model"):
-            self._vggish_model = torch.hub.load('harritaylor/torchvggish', 'vggish')
+            self._vggish_model = torch.hub.load('harritaylor/torchvggish', 'vggish', trust_repo=True)
             self._vggish_model.eval()
             self._vggish_model.postprocess = False
         return self._vggish_model
@@ -457,6 +457,7 @@ class DDPM(pl.LightningModule):
     def on_validation_epoch_start(self):
         self._fad_ref_embs = []
         self._fad_pred_embs = []
+        self._get_vggish()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
