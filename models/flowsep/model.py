@@ -457,7 +457,15 @@ class DDPM(pl.LightningModule):
     def on_validation_epoch_start(self):
         self._fad_ref_embs = []
         self._fad_pred_embs = []
-        self._get_vggish()
+        if not hasattr(self, "_vggish_model"):
+            if torch.distributed.is_initialized():
+                if self.global_rank == 0:
+                    self._get_vggish()
+                torch.distributed.barrier()
+                if self.global_rank != 0:
+                    self._get_vggish()
+            else:
+                self._get_vggish()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
