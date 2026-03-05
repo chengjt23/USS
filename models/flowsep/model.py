@@ -423,25 +423,6 @@ class DDPM(pl.LightningModule):
         log_mel = torch.log(mel.clamp(min=1e-7))
         return log_mel.mean(dim=-1)
 
-    def _get_vggish(self):
-        if not hasattr(self, "_vggish_model"):
-            self._vggish_model = torch.hub.load('harritaylor/torchvggish', 'vggish', trust_repo=True)
-            self._vggish_model.eval()
-            self._vggish_model.postprocess = False
-        return self._vggish_model
-
-    def _extract_fad_embedding(self, wav, sr):
-        vggish = self._get_vggish()
-        wav_16k = wav
-        if sr != 16000:
-            wav_16k = torchaudio.functional.resample(wav, sr, 16000)
-        embs = []
-        for i in range(wav_16k.shape[0]):
-            with torch.no_grad():
-                emb = vggish.forward(wav_16k[i].numpy(), 16000)
-            embs.append(emb.mean(0))
-        return torch.stack(embs)
-
     @staticmethod
     def _frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
         from scipy.linalg import sqrtm
@@ -457,15 +438,6 @@ class DDPM(pl.LightningModule):
     def on_validation_epoch_start(self):
         self._fad_ref_embs = []
         self._fad_pred_embs = []
-        if not hasattr(self, "_vggish_model"):
-            if torch.distributed.is_initialized():
-                if self.global_rank == 0:
-                    self._get_vggish()
-                torch.distributed.barrier()
-                if self.global_rank != 0:
-                    self._get_vggish()
-            else:
-                self._get_vggish()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
@@ -507,8 +479,8 @@ class DDPM(pl.LightningModule):
                 except Exception:
                     pass
                 if hasattr(self, "_fad_ref_embs"):
-                    self._fad_ref_embs.append(self._extract_fad_embedding(ref_t, sr=self.sampling_rate))
-                    self._fad_pred_embs.append(self._extract_fad_embedding(pred_t, sr=self.sampling_rate))
+                    self._fad_ref_embs.append(self._mel_embedding(ref_t, sr=self.sampling_rate))
+                    self._fad_pred_embs.append(self._mel_embedding(pred_t, sr=self.sampling_rate))
             except Exception:
                 pass
 
