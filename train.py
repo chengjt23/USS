@@ -192,7 +192,7 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
         devices=device_count,
         logger=wandb_logger,
         max_steps=max_steps,
-        num_sanity_val_steps=0,
+        num_sanity_val_steps=2,
         limit_val_batches=limit_val_batches,
         limit_train_batches=10000,
         precision="bf16-mixed",
