@@ -7,7 +7,19 @@ from typing import List, Tuple
 
 import torch
 import torchaudio
+import soundfile as sf
+import numpy as np
 import webdataset as wds
+
+
+def _load_wav_bytes(buf: bytes):
+    data, sr = sf.read(io.BytesIO(buf), dtype="float32")
+    t = torch.from_numpy(data)
+    if t.ndim == 1:
+        t = t.unsqueeze(0)
+    else:
+        t = t.T
+    return t, sr
 import pytorch_lightning as pl
 
 
@@ -15,7 +27,7 @@ def decode_sample_to_tensors(sample: dict, target_sr: int):
     mix_bytes = sample.get("mix.wav") or sample.get("mix")
     if mix_bytes is None:
         raise KeyError("sample missing 'mix.wav' key")
-    mix_tensor, sr = torchaudio.load(io.BytesIO(mix_bytes))
+    mix_tensor, sr = _load_wav_bytes(mix_bytes)
     if sr != target_sr:
         mix_tensor = torchaudio.functional.resample(mix_tensor, sr, target_sr)
 
@@ -23,7 +35,7 @@ def decode_sample_to_tensors(sample: dict, target_sr: int):
 
     src_tensors = []
     for k in source_keys:
-        src_tensor, _ = torchaudio.load(io.BytesIO(sample[k]))
+        src_tensor, _ = _load_wav_bytes(sample[k])
         if sr != target_sr:
             src_tensor = torchaudio.functional.resample(src_tensor, sr, target_sr)
         src_tensors.append(src_tensor)
