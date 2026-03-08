@@ -7,6 +7,7 @@ from typing import List, Tuple
 
 import torch
 import torchaudio
+torchaudio.set_audio_backend("soundfile")
 import webdataset as wds
 import pytorch_lightning as pl
 
