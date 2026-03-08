@@ -15,14 +15,15 @@ from train import build_stft_tool, convert_wds_batch_to_model_format
 
 def profile_step(model, batch, device):
     timings = {}
+    from models.flowsep.model import DDPM
+    base_get_input = DDPM.get_input
 
-    # ---- 1. mel 特征提取 (CPU) ----
+    # ---- 1. mel 特征提取 ----
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    x = model.get_input(batch, model.first_stage_key)
-    x = x.to(device)
+    x = base_get_input(model, batch, model.first_stage_key).to(device)
     torch.cuda.synchronize()
-    timings["1_get_input_mel_to_gpu"] = time.perf_counter() - t0
+    timings["1_get_input_mel"] = time.perf_counter() - t0
 
     # ---- 2. VAE encode (target) ----
     torch.cuda.synchronize()
@@ -35,14 +36,12 @@ def profile_step(model, batch, device):
     torch.cuda.synchronize()
     timings["2_vae_encode_target"] = time.perf_counter() - t0
 
-    # ---- 3. VAE encode (mix, extra_channels) ----
+    # ---- 3. VAE encode (mix) ----
     if model.extra_channels:
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        extra = model.get_input(batch, model.extra_channel_key)
-        extra = extra.to(device).reshape(extra.shape[0], 1, extra.shape[1], -1) if extra.ndim == 3 else extra.to(device)
-        if extra.ndim == 3:
-            extra = extra.reshape(extra.shape[0], 1, extra.shape[1], -1)
+        extra = base_get_input(model, batch, model.extra_channel_key).to(device)
+        extra = extra.reshape(extra.shape[0], 1, extra.shape[1], -1)
         extra_posterior = model.encode_first_stage(extra)
         e = model.get_first_stage_encoding(extra_posterior).detach()
         z = torch.cat([z, e], dim=1)
@@ -55,7 +54,7 @@ def profile_step(model, batch, device):
     cond_dict = {}
     for cond_model_key in model.cond_stage_model_metadata.keys():
         cond_stage_key = model.cond_stage_model_metadata[cond_model_key]["cond_stage_key"]
-        xc = model.get_input(batch, cond_stage_key)
+        xc = base_get_input(model, batch, cond_stage_key)
         if isinstance(xc, torch.Tensor):
             xc = xc.to(device)
         c = model.get_learned_conditioning(xc, key=cond_model_key, unconditional_cfg=False)
@@ -107,18 +106,18 @@ def main():
     model = model.to(device)
     model.train()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(configs["model"]["params"]["base_learning_rate"]))
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=float(configs["model"]["params"]["base_learning_rate"]),
+    )
 
     all_timings = []
 
     step = 0
     for raw_batch in train_loader:
-        batch = convert_wds_batch_to_model_format(raw_batch, configs, stft_tool)
-
-        # data loading 计时
         torch.cuda.synchronize()
         t_data_start = time.perf_counter()
-        batch_next_ready = True
+        batch = convert_wds_batch_to_model_format(raw_batch, configs, stft_tool)
         torch.cuda.synchronize()
         t_data = time.perf_counter() - t_data_start
 
@@ -126,7 +125,6 @@ def main():
         timings = profile_step(model, batch, device)
         timings["0_data_preprocess"] = t_data
 
-        # optimizer step
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         optimizer.step()
