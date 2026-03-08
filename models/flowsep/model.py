@@ -1318,7 +1318,7 @@ class LatentDiffusion(DDPM):
 
                         count = 0
                         for name in fnames:
-                            torchaudio.save(os.path.join(mixed_save_path, os.path.basename(name)), mixed_waveform[count].cpu(), self.sampling_rate)
+                            sf.write(os.path.join(mixed_save_path, os.path.basename(name)), mixed_waveform[count].cpu().numpy().T, self.sampling_rate)
                             count += 1
 
                 if limit_num is not None and i * z.size(0) > limit_num:
