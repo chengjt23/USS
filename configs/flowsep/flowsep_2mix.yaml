@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "flowsep"
+exp_name: "flowsep-2mix"
 project: "USS"
 precision: "medium"
 
