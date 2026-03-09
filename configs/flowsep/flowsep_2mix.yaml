@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "bridge"
+exp_name: "flowsep"
 project: "USS"
 precision: "medium"
 
@@ -16,12 +16,12 @@ datamodule:
     shuffle_buffer: 1000
     drop_last: false
     persistent_workers: true
-    mix_selected: [2mix, 3mix, 4mix, 5mix]
+    mix_selected: [2mix]
 
 step:
   validation_every_n_epochs: 1
   save_checkpoint_every_n_steps: 100000
-  max_steps: 300000
+  max_steps: 4000000
   save_top_k: 4
 
 preprocessing:
@@ -66,7 +66,6 @@ model:
     retrival_num: 0
     use_clap: false
     euler: true
-    bridge_mode: true
     unet_config:
       target: models.flowsep.unet.UNetModel
       params:
