@@ -183,6 +183,8 @@ def create_wds_dataloader(
         wds.shuffle(shuffle_buffer),
         wds.map(lambda sample: decode_sample_to_tensors(sample, sample_rate)),
     ]
+    if not is_val:
+        pipeline.append(wds.repeat)
     dataset = wds.DataPipeline(*pipeline)
 
     loader = wds.WebLoader(
