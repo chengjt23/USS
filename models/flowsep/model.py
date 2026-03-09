@@ -478,6 +478,25 @@ class DDPM(pl.LightningModule):
                     loss_dict["val/pesq"] = float(np.mean(pesq_scores))
                 except Exception:
                     pass
+                try:
+                    from dnsmos.dnsmos_debug import compute_dnsmos, PRIMARY_MODEL, P808_MODEL
+                    if not hasattr(self, '_dnsmos_primary_sess'):
+                        import onnxruntime as ort
+                        self._dnsmos_primary_sess = ort.InferenceSession(PRIMARY_MODEL, providers=["CPUExecutionProvider"])
+                        self._dnsmos_p808_sess = ort.InferenceSession(P808_MODEL, providers=["CPUExecutionProvider"])
+                    dnsmos_vals = {"sig": [], "bak": [], "ovr": [], "p808_mos": []}
+                    for i in range(pred_t.shape[0]):
+                        e = pred_t[i].numpy().astype(np.float32)
+                        if self.sampling_rate != 16000:
+                            e = torchaudio.functional.resample(torch.from_numpy(e), self.sampling_rate, 16000).numpy().astype(np.float32)
+                        scores = compute_dnsmos(e, self._dnsmos_primary_sess, self._dnsmos_p808_sess)
+                        for k in dnsmos_vals:
+                            dnsmos_vals[k].append(scores[k.upper()])
+                    for k, v in dnsmos_vals.items():
+                        loss_dict[f"val/dnsmos_{k}"] = float(np.mean(v))
+                except Exception:
+                    print("Failed to compute DNSMOS scores")
+                    pass
                 if hasattr(self, "_fad_ref_embs"):
                     self._fad_ref_embs.append(self._mel_embedding(ref_t, sr=self.sampling_rate))
                     self._fad_pred_embs.append(self._mel_embedding(pred_t, sr=self.sampling_rate))
