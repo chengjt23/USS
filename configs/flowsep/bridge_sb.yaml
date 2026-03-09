@@ -16,6 +16,7 @@ datamodule:
     shuffle_buffer: 1000
     drop_last: false
     persistent_workers: true
+    mix_selected: [2mix, 3mix, 4mix, 5mix]
 
 step:
   validation_every_n_epochs: 1

@@ -137,22 +137,31 @@ def create_wds_dataloader(
     drop_last: bool = False,
     persistent_workers: bool = True,
     is_val: bool = False,
+    mix_selected: list = None,
 ):
+    if mix_selected is not None:
+        selected_dirs = [os.path.join(root_dir, m) for m in mix_selected]
+    else:
+        selected_dirs = [root_dir]
+
     if is_val:
-        subdirs = [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))]
-        if len(subdirs) != 4:
-            raise ValueError(f"Validation root_dir must contain exactly 4 subdirectories, found {len(subdirs)}")
         tar_paths = []
         rng = random.Random(42)
-        for subdir in sorted(subdirs):
-            subdir_path = os.path.join(root_dir, subdir)
-            tar_files = sorted(glob.glob(os.path.join(subdir_path, "*.tar")))
-            if len(tar_files) == 0:
-                raise FileNotFoundError(f"No .tar files found in subdirectory: {subdir_path}")
-            selected_tars = rng.sample(tar_files, 2)
-            tar_paths.extend(selected_tars)
+        for d in selected_dirs:
+            subdirs = sorted([s for s in os.listdir(d) if os.path.isdir(os.path.join(d, s))]) if mix_selected is None else [d]
+            for subdir_path in (subdirs if mix_selected is None else [d]):
+                if mix_selected is None:
+                    subdir_path = os.path.join(d, subdir_path)
+                tar_files = sorted(glob.glob(os.path.join(subdir_path, "*.tar")))
+                if len(tar_files) == 0:
+                    continue
+                selected_tars = rng.sample(tar_files, min(2, len(tar_files)))
+                tar_paths.extend(selected_tars)
     else:
-        tar_paths = sorted(glob.glob(os.path.join(root_dir, "**", "*.tar"), recursive=True))
+        tar_paths = []
+        for d in selected_dirs:
+            tar_paths.extend(glob.glob(os.path.join(d, "**", "*.tar"), recursive=True))
+        tar_paths.sort()
         random.shuffle(tar_paths)
 
     if len(tar_paths) == 0:
@@ -195,9 +204,11 @@ class WDSDataModule(pl.LightningDataModule):
         shuffle_buffer: int = 1000,
         drop_last: bool = False,
         persistent_workers: bool = True,
+        mix_selected: list = None,
     ):
         super().__init__()
         self.train_dir = train_dir
+        self.mix_selected = mix_selected
         self.val_dir = val_dir
         self.test_dir = test_dir
         self.sample_rate = sample_rate
@@ -216,6 +227,7 @@ class WDSDataModule(pl.LightningDataModule):
             shuffle_buffer=self.shuffle_buffer,
             drop_last=self.drop_last,
             persistent_workers=self.persistent_workers,
+            mix_selected=self.mix_selected,
         )
 
     def val_dataloader(self):
@@ -230,6 +242,7 @@ class WDSDataModule(pl.LightningDataModule):
             drop_last=False,
             persistent_workers=self.persistent_workers,
             is_val=True,
+            mix_selected=self.mix_selected,
         )
 
     def test_dataloader(self):
@@ -243,6 +256,7 @@ class WDSDataModule(pl.LightningDataModule):
             shuffle_buffer=0,
             drop_last=False,
             persistent_workers=self.persistent_workers,
+            mix_selected=self.mix_selected,
         )
 
     @property
