@@ -34,15 +34,15 @@ def compute_dnsmos(audio, primary_sess, p808_sess, sr=SR):
         audio = np.concatenate([audio, audio])
     audio = audio[:len_samples]
 
-    mel = audio_melspec(audio, sr=sr)[np.newaxis, :, :]
-    p808_mel = audio_melspec(audio[:int(sr * 9)], sr=sr)[np.newaxis, :, :]
+    mel = audio_melspec(audio, sr=sr)
+    p808_mel = audio_melspec(audio[:int(sr * 9)], sr=sr)
 
     oi = primary_sess.get_inputs()[0].name
-    out = primary_sess.run(None, {oi: mel})[0][0]
+    out = primary_sess.run(None, {oi: mel})[0]
     sig, bak, ovr = get_polyfit_val(out[0], out[1], out[2])
 
     oi808 = p808_sess.get_inputs()[0].name
-    p808_mos = p808_sess.run(None, {oi808: p808_mel})[0][0][0]
+    p808_mos = p808_sess.run(None, {oi808: p808_mel})[0][0]
 
     return {"SIG": float(sig), "BAK": float(bak), "OVR": float(ovr), "P808_MOS": float(p808_mos)}
 
