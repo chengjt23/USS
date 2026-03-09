@@ -120,8 +120,23 @@ class WrappedDataLoader:
         self.stft_tool = stft_tool
 
     def __iter__(self):
-        for batch in self.base_loader:
-            yield convert_wds_batch_to_model_format(batch, self.config, self.stft_tool)
+        import threading, queue
+        q = queue.Queue(maxsize=2)
+        sentinel = object()
+
+        def _producer():
+            for raw in self.base_loader:
+                q.put(convert_wds_batch_to_model_format(raw, self.config, self.stft_tool))
+            q.put(sentinel)
+
+        t = threading.Thread(target=_producer, daemon=True)
+        t.start()
+        while True:
+            item = q.get()
+            if item is sentinel:
+                break
+            yield item
+        t.join()
 
     def __len__(self):
         return len(self.base_loader)

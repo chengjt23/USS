@@ -811,7 +811,7 @@ class LatentDiffusion(DDPM):
     ):    
         x = super().get_input(batch, k)
 
-        x = x.to(self.device)
+        x = x.to(self.device, non_blocking=True)
 
         if return_first_stage_encode:
             encoder_posterior = self.encode_first_stage(x)
@@ -822,7 +822,7 @@ class LatentDiffusion(DDPM):
                 z = self.get_first_stage_encoding(encoder_posterior).detach()
 
             if self.extra_channels: 
-                extra = super().get_input(batch, self.extra_channel_key).to(self.device)
+                extra = super().get_input(batch, self.extra_channel_key).to(self.device, non_blocking=True)
                 extra = extra.reshape(extra.shape[0], 1, extra.shape[1], -1)
                 extra_posterior = self.encode_first_stage(extra)
                 e = self.get_first_stage_encoding(extra_posterior).detach()
