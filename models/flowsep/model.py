@@ -494,9 +494,8 @@ class DDPM(pl.LightningModule):
                             dnsmos_vals[k].append(scores[k.upper()])
                     for k, v in dnsmos_vals.items():
                         loss_dict[f"val/dnsmos_{k}"] = float(np.mean(v))
-                except Exception:
-                    print("Failed to compute DNSMOS scores")
-                    pass
+                except Exception as e:
+                    raise RuntimeError(f"Failed to compute DNSMOS scores: {e}")
                 if hasattr(self, "_fad_ref_embs"):
                     self._fad_ref_embs.append(self._mel_embedding(ref_t, sr=self.sampling_rate))
                     self._fad_pred_embs.append(self._mel_embedding(pred_t, sr=self.sampling_rate))
