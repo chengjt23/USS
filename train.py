@@ -152,6 +152,7 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
     device_count = torch.cuda.device_count()
     config_reload_from_ckpt = configs.get("reload_from_ckpt")
     limit_val_batches = configs.get("step", {}).get("limit_val_batches")
+    limit_train_batches = configs.get("step", {}).get("limit_train_batches", 10000)
 
     save_checkpoint_every_n_steps = configs["step"]["save_checkpoint_every_n_steps"]
     max_steps = configs["step"]["max_steps"]
@@ -194,7 +195,7 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
         max_steps=max_steps,
         num_sanity_val_steps=2,
         limit_val_batches=limit_val_batches,
-        limit_train_batches=10000,
+        limit_train_batches=limit_train_batches,
         precision="bf16-mixed",
         strategy=DDPStrategy(find_unused_parameters=True),
         callbacks=[checkpoint_callback],
