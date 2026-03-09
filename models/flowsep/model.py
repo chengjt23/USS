@@ -1210,7 +1210,8 @@ class LatentDiffusion(DDPM):
         else:
             x = torch.randn(size, device=self.device) * temperature
 
-        t_span = torch.linspace(0, 1, n_timesteps + 1, device=self.device)
+        sampling_eps = 1e-3
+        t_span = torch.linspace(sampling_eps, 1 - sampling_eps, n_timesteps + 1, device=self.device)
         rho = self.sb_rho
 
         for step in range(1, len(t_span)):
@@ -1220,8 +1221,8 @@ class LatentDiffusion(DDPM):
             model_out = self._model_forward(x, t_batch, cond, x_T)
 
             if self.bridge_mode and self.sb_schedule and self.data_prediction and x_T is not None:
-                rho_p = rho * torch.sqrt(t_prev + 1e-8)
-                rho_c = rho * torch.sqrt(t_curr + 1e-8)
+                rho_p = rho * torch.sqrt(1 - t_prev + 1e-8)
+                rho_c = rho * torch.sqrt(1 - t_curr + 1e-8)
                 rho_T = rho
                 rho_bar_p = torch.sqrt(rho_T ** 2 - rho_p ** 2 + 1e-8)
                 rho_bar_c = torch.sqrt(rho_T ** 2 - rho_c ** 2 + 1e-8)
