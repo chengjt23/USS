@@ -125,9 +125,13 @@ class WrappedDataLoader:
         sentinel = object()
 
         def _producer():
-            for raw in self.base_loader:
-                q.put(convert_wds_batch_to_model_format(raw, self.config, self.stft_tool))
-            q.put(sentinel)
+            try:
+                for raw in self.base_loader:
+                    q.put(convert_wds_batch_to_model_format(raw, self.config, self.stft_tool))
+            except Exception as e:
+                print(f"[WrappedDataLoader] producer error: {e}")
+            finally:
+                q.put(sentinel)
 
         t = threading.Thread(target=_producer, daemon=True)
         t.start()
