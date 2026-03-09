@@ -476,8 +476,8 @@ class DDPM(pl.LightningModule):
                             e = torchaudio.functional.resample(torch.from_numpy(e), self.sampling_rate, 16000).numpy()
                         pesq_scores.append(pesq_fn(16000, r.astype(np.float32), e.astype(np.float32), "wb"))
                     loss_dict["val/pesq"] = float(np.mean(pesq_scores))
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise RuntimeError(f"Failed to compute PESQ scores: {e}")
                 try:
                     from dnsmos.dnsmos_debug import compute_dnsmos, PRIMARY_MODEL, P808_MODEL
                     if not hasattr(self, '_dnsmos_primary_sess'):
@@ -499,8 +499,8 @@ class DDPM(pl.LightningModule):
                 if hasattr(self, "_fad_ref_embs"):
                     self._fad_ref_embs.append(self._mel_embedding(ref_t, sr=self.sampling_rate))
                     self._fad_pred_embs.append(self._mel_embedding(pred_t, sr=self.sampling_rate))
-            except Exception:
-                pass
+            except Exception as e:
+                raise RuntimeError(f"Failed in validation metric computation: {e}")
 
         self.log_dict(
         {k: float(v) for k, v in loss_dict.items()},
@@ -511,7 +511,7 @@ class DDPM(pl.LightningModule):
         )
 
     def on_validation_epoch_end(self):
-        if hasattr(self, "_fad_ref_embs") and len(self._fad_ref_embs) > 1:
+        if hasattr(self, "_fad_ref_embs") and len(self._fad_ref_embs) > 0:
             try:
                 ref_all = torch.cat(self._fad_ref_embs, dim=0)
                 pred_all = torch.cat(self._fad_pred_embs, dim=0)
@@ -520,8 +520,8 @@ class DDPM(pl.LightningModule):
                 sigma_p = torch.cov(pred_all.T)
                 fad = self._frechet_distance(mu_r, sigma_r, mu_p, sigma_p)
                 self.log("val/fad", fad, prog_bar=False, logger=True)
-            except Exception:
-                pass
+            except Exception as e:
+                raise RuntimeError(f"Failed to compute FAD: {e}")
         self._fad_ref_embs = []
         self._fad_pred_embs = []
 
