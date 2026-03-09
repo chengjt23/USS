@@ -7,24 +7,21 @@ P808_MODEL = os.path.join(os.path.dirname(__file__), "model_v8.onnx")
 
 SR = 16000
 INPUT_LENGTH = 9.01
-N_FFT = 320
-HOP_LENGTH = 160
-N_MELS = 120
 
 
-def audio_melspec(audio, sr=SR):
+def audio_melspec(audio, n_mels=120, frame_size=320, hop_length=160, sr=16000):
     import librosa
-    mel = librosa.feature.melspectrogram(
-        y=audio, sr=sr, n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS
+    mel_spec = librosa.feature.melspectrogram(
+        y=audio, sr=sr, n_fft=frame_size + 1, hop_length=hop_length, n_mels=n_mels
     )
-    mel_db = librosa.power_to_db(mel, ref=np.max)
-    return mel_db.T.astype(np.float32)
+    mel_spec = (librosa.power_to_db(mel_spec, ref=np.max) + 40) / 40
+    return mel_spec.T
 
 
 def get_polyfit_val(sig, bak, ovr):
-    p_sig = np.poly1d([-0.08572166, 0.40221407, 1.0839862, -0.22786875])
-    p_bak = np.poly1d([-0.13543826, 0.87185817, 0.19576773, 0.13120761])
-    p_ovr = np.poly1d([-0.03255527, 0.23521211, -0.18003412, 0.92045015])
+    p_sig = np.poly1d([-0.08397278, 1.22083953, 0.0052439])
+    p_bak = np.poly1d([-0.13166888, 1.60915514, -0.39604546])
+    p_ovr = np.poly1d([-0.06766283, 1.11546468, 0.04602535])
     return p_sig(sig), p_bak(bak), p_ovr(ovr)
 
 
@@ -34,15 +31,13 @@ def compute_dnsmos(audio, primary_sess, p808_sess, sr=SR):
         audio = np.concatenate([audio, audio])
     audio = audio[:len_samples]
 
-    mel = audio_melspec(audio, sr=sr)
-    p808_mel = audio_melspec(audio[:int(sr * 9)], sr=sr)
-
     oi = primary_sess.get_inputs()[0].name
-    out = primary_sess.run(None, {oi: mel})[0]
+    out = primary_sess.run(None, {oi: audio[np.newaxis, :]})[0][0]
     sig, bak, ovr = get_polyfit_val(out[0], out[1], out[2])
 
+    p808_input = np.array(audio_melspec(audio=audio[:-160])).astype('float32')[np.newaxis, :, :]
     oi808 = p808_sess.get_inputs()[0].name
-    p808_mos = p808_sess.run(None, {oi808: p808_mel})[0][0]
+    p808_mos = p808_sess.run(None, {oi808: p808_input})[0][0][0]
 
     return {"SIG": float(sig), "BAK": float(bak), "OVR": float(ovr), "P808_MOS": float(p808_mos)}
 
