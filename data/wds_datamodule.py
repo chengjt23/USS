@@ -167,15 +167,18 @@ def create_wds_dataloader(
     if len(tar_paths) == 0:
         raise FileNotFoundError("No .tar files found in given root_dir")
 
-    dataset = wds.DataPipeline(
+    pipeline = [
         wds.SimpleShardList(tar_paths),
         wds.shuffle(100 if shuffle_buffer > 0 else 0),
-        wds.split_by_node,
-        wds.split_by_worker,
+    ]
+    if not is_val:
+        pipeline += [wds.split_by_node, wds.split_by_worker]
+    pipeline += [
         wds.tarfile_to_samples(handler=wds.warn_and_continue),
         wds.shuffle(shuffle_buffer),
-        wds.map(lambda sample: decode_sample_to_tensors(sample, sample_rate))
-    )
+        wds.map(lambda sample: decode_sample_to_tensors(sample, sample_rate)),
+    ]
+    dataset = wds.DataPipeline(*pipeline)
 
     loader = wds.WebLoader(
         dataset,
