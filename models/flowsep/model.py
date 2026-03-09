@@ -474,8 +474,12 @@ class DDPM(pl.LightningModule):
                         if self.sampling_rate != 16000:
                             r = torchaudio.functional.resample(torch.from_numpy(r), self.sampling_rate, 16000).numpy()
                             e = torchaudio.functional.resample(torch.from_numpy(e), self.sampling_rate, 16000).numpy()
-                        pesq_scores.append(pesq_fn(16000, r.astype(np.float32), e.astype(np.float32), "wb"))
-                    loss_dict["val/pesq"] = float(np.mean(pesq_scores))
+                        try:
+                            pesq_scores.append(pesq_fn(16000, r.astype(np.float32), e.astype(np.float32), "wb"))
+                        except Exception:
+                            continue
+                    if len(pesq_scores) > 0:
+                        loss_dict["val/pesq"] = float(np.mean(pesq_scores))
                 except Exception as e:
                     raise RuntimeError(f"Failed to compute PESQ scores: {e}")
                 try:
