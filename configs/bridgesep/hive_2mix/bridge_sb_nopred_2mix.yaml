@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "sb_schedule-part-2mix"
+exp_name: "bridge_sb_nopred-2mix"
 project: "USS"
 precision: "medium"
 
@@ -17,13 +17,12 @@ datamodule:
     drop_last: false
     persistent_workers: true
     mix_selected: [2mix]
-    data_ratio: 0.05
 
 step:
   validation_every_n_epochs: 1
-  save_checkpoint_every_n_steps: 5000
+  save_checkpoint_every_n_steps: 10000
   limit_train_batches: 1000
-  max_steps: 50000
+  max_steps: 200000
   save_top_k: 4
 
 preprocessing:
@@ -68,6 +67,7 @@ model:
     retrival_num: 0
     use_clap: false
     euler: true
+    bridge_mode: true
     sb_schedule: true
     sb_rho: 1.0
     unet_config:
