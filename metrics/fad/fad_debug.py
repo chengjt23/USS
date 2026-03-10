@@ -31,9 +31,15 @@ class WaveDataset(Dataset):
         return torch.from_numpy(wav)
 
 
+VGGISH_URLS = {
+    'vggish': 'https://github.com/harritaylor/torchvggish/releases/download/v0.1/vggish-10086976.pth',
+    'pca': 'https://github.com/harritaylor/torchvggish/releases/download/v0.1/vggish_pca_params-970ea276.pth',
+}
+
+
 def load_vggish():
-    model = torch.hub.load("harritaylor/torchvggish", "vggish")
-    model.postprocess = False
+    from torchvggish.vggish import VGGish
+    model = VGGish(urls=VGGISH_URLS, pretrained=True, postprocess=False)
     model.embeddings = nn.Sequential(*list(model.embeddings.children())[:-1])
     model.eval()
     return model
