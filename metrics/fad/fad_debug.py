@@ -5,7 +5,7 @@ from torch import nn
 from scipy import linalg
 from scipy.signal import resample_poly
 from math import gcd
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import soundfile as sf
 
 
@@ -39,7 +39,7 @@ def load_vggish():
     return model
 
 
-def get_embeddings_vggish(model, audio_dir, sr=16000):
+def get_embeddings(model, audio_dir, sr=16000):
     dataset = WaveDataset(audio_dir, sr)
     embd_list = []
     for i in range(len(dataset)):
@@ -49,21 +49,6 @@ def get_embeddings_vggish(model, audio_dir, sr=16000):
             embd = embd.cpu()
         embd_list.append(embd.detach().numpy())
     return np.concatenate(embd_list, axis=0)
-
-
-def get_embeddings_mel(audio_dir, sr=16000, n_mels=128, n_fft=1024, hop=160):
-    import torchaudio
-    dataset = WaveDataset(audio_dir, sr)
-    mel_fn = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sr, n_fft=n_fft, hop_length=hop, n_mels=n_mels
-    )
-    embd_list = []
-    for i in range(len(dataset)):
-        wav = dataset[i].unsqueeze(0)
-        mel = mel_fn(wav)
-        log_mel = torch.log(mel.clamp(min=1e-7))
-        embd_list.append(log_mel.mean(dim=-1).squeeze(0).numpy())
-    return np.stack(embd_list, axis=0)
 
 
 def calculate_statistics(embd):
@@ -89,57 +74,58 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     return float(diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
 
 
-def compute_fad(ref_dir, gen_dir, use_vggish=False, sr=16000):
-    if use_vggish:
-        model = load_vggish()
-        embd_ref = get_embeddings_vggish(model, ref_dir, sr)
-        embd_gen = get_embeddings_vggish(model, gen_dir, sr)
-    else:
-        embd_ref = get_embeddings_mel(ref_dir, sr)
-        embd_gen = get_embeddings_mel(gen_dir, sr)
-
-    mu_ref, sigma_ref = calculate_statistics(embd_ref)
-    mu_gen, sigma_gen = calculate_statistics(embd_gen)
-    return calculate_frechet_distance(mu_ref, sigma_ref, mu_gen, sigma_gen)
+def compute_fad(dir_a, dir_b, sr=16000):
+    model = load_vggish()
+    embd_a = get_embeddings(model, dir_a, sr)
+    embd_b = get_embeddings(model, dir_b, sr)
+    mu_a, sigma_a = calculate_statistics(embd_a)
+    mu_b, sigma_b = calculate_statistics(embd_b)
+    return calculate_frechet_distance(mu_a, sigma_a, mu_b, sigma_b)
 
 
 if __name__ == "__main__":
-    import argparse
+    import time
+    import shutil
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ref_dir", type=str, default=None)
-    parser.add_argument("--gen_dir", type=str, default=None)
-    parser.add_argument("--use_vggish", action="store_true")
-    parser.add_argument("--sr", type=int, default=16000)
-    args = parser.parse_args()
+    print("=== FAD demo with synthetic audio ===")
+    tmp_a = os.path.join(os.path.dirname(__file__), "_tmp_a")
+    tmp_b = os.path.join(os.path.dirname(__file__), "_tmp_b")
+    os.makedirs(tmp_a, exist_ok=True)
+    os.makedirs(tmp_b, exist_ok=True)
 
-    if args.ref_dir and args.gen_dir:
-        fad = compute_fad(args.ref_dir, args.gen_dir, args.use_vggish, args.sr)
-        print(f"FAD = {fad:.4f}")
-    else:
-        print("=== FAD demo with synthetic audio ===")
-        tmp_ref = os.path.join(os.path.dirname(__file__), "_tmp_ref")
-        tmp_gen = os.path.join(os.path.dirname(__file__), "_tmp_gen")
-        os.makedirs(tmp_ref, exist_ok=True)
-        os.makedirs(tmp_gen, exist_ok=True)
+    rng = np.random.default_rng(42)
+    sr = 16000
+    duration = 3
+    n_samples = 10
 
-        rng = np.random.default_rng(42)
-        sr = 16000
-        duration = 3
-        n_samples = 10
+    for i in range(n_samples):
+        t = np.linspace(0, duration, sr * duration, endpoint=False)
+        freq = 200 + i * 50
+        audio_a = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.05).astype(np.float32)
+        audio_b = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.3).astype(np.float32)
+        sf.write(os.path.join(tmp_a, f"{i}.wav"), audio_a, sr)
+        sf.write(os.path.join(tmp_b, f"{i}.wav"), audio_b, sr)
 
-        for i in range(n_samples):
-            t = np.linspace(0, duration, sr * duration, endpoint=False)
-            freq = 200 + i * 50
-            ref = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.05).astype(np.float32)
-            gen = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.3).astype(np.float32)
-            sf.write(os.path.join(tmp_ref, f"{i}.wav"), ref, sr)
-            sf.write(os.path.join(tmp_gen, f"{i}.wav"), gen, sr)
+    n_runs = 5
+    times = []
+    fad_values = []
+    model = load_vggish()
+    embd_a = get_embeddings(model, tmp_a, sr)
+    embd_b = get_embeddings(model, tmp_b, sr)
 
-        fad = compute_fad(tmp_ref, tmp_gen, use_vggish=False, sr=sr)
-        print(f"FAD (mel-based) = {fad:.4f}")
+    for r in range(n_runs):
+        t0 = time.time()
+        mu_a, sigma_a = calculate_statistics(embd_a)
+        mu_b, sigma_b = calculate_statistics(embd_b)
+        fad = calculate_frechet_distance(mu_a, sigma_a, mu_b, sigma_b)
+        elapsed = time.time() - t0
+        times.append(elapsed)
+        fad_values.append(fad)
+        print(f"  run {r+1}/{n_runs}: FAD = {fad:.4f}, time = {elapsed:.4f}s")
 
-        import shutil
-        shutil.rmtree(tmp_ref)
-        shutil.rmtree(tmp_gen)
-        print("Temp dirs cleaned.")
+    print(f"\nFAD mean = {np.mean(fad_values):.4f}")
+    print(f"Time mean = {np.mean(times):.4f}s (over {n_runs} runs)")
+
+    shutil.rmtree(tmp_a)
+    shutil.rmtree(tmp_b)
+    print("Temp dirs cleaned.")

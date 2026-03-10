@@ -1,8 +1,6 @@
 import os
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import scipy.linalg
 from scipy.signal import resample_poly
 from math import gcd
@@ -52,7 +50,7 @@ def load_cnn14(sr=16000):
     return model
 
 
-def get_embeddings_cnn14(model, audio_dir, sr=16000, device="cpu"):
+def get_embeddings(model, audio_dir, sr=16000, device="cpu"):
     dataset = WaveDataset(audio_dir, sr)
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
     model = model.to(device)
@@ -65,26 +63,9 @@ def get_embeddings_cnn14(model, audio_dir, sr=16000, device="cpu"):
     return torch.cat(embd_list, dim=0)
 
 
-def get_embeddings_mel(audio_dir, sr=16000, n_mels=128, n_fft=1024, hop=160):
-    import torchaudio
-    dataset = WaveDataset(audio_dir, sr)
-    mel_fn = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sr, n_fft=n_fft, hop_length=hop, n_mels=n_mels
-    )
-    embd_list = []
-    for i in range(len(dataset)):
-        wav = dataset[i].unsqueeze(0)
-        mel = mel_fn(wav)
-        log_mel = torch.log(mel.clamp(min=1e-7))
-        embd_list.append(log_mel.mean(dim=-1).squeeze(0))
-    return torch.stack(embd_list, dim=0)
-
-
 def calculate_fid(features_1, features_2, eps=1e-6):
-    assert features_1.dim() == 2 and features_2.dim() == 2
-
-    f1 = features_1.numpy()
-    f2 = features_2.numpy()
+    f1 = features_1.numpy() if torch.is_tensor(features_1) else features_1
+    f2 = features_2.numpy() if torch.is_tensor(features_2) else features_2
 
     mu1 = np.mean(f1, axis=0)
     sigma1 = np.cov(f1, rowvar=False)
@@ -111,55 +92,54 @@ def calculate_fid(features_1, features_2, eps=1e-6):
     return float(diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
 
 
-def compute_fid(ref_dir, gen_dir, use_cnn14=False, sr=16000, device="cpu"):
-    if use_cnn14:
-        model = load_cnn14(sr)
-        feat_ref = get_embeddings_cnn14(model, ref_dir, sr, device)
-        feat_gen = get_embeddings_cnn14(model, gen_dir, sr, device)
-    else:
-        feat_ref = get_embeddings_mel(ref_dir, sr)
-        feat_gen = get_embeddings_mel(gen_dir, sr)
-    return calculate_fid(feat_ref, feat_gen)
+def compute_fid(dir_a, dir_b, sr=16000, device="cpu"):
+    model = load_cnn14(sr)
+    feat_a = get_embeddings(model, dir_a, sr, device)
+    feat_b = get_embeddings(model, dir_b, sr, device)
+    return calculate_fid(feat_a, feat_b)
 
 
 if __name__ == "__main__":
-    import argparse
+    import time
+    import shutil
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ref_dir", type=str, default=None)
-    parser.add_argument("--gen_dir", type=str, default=None)
-    parser.add_argument("--use_cnn14", action="store_true")
-    parser.add_argument("--sr", type=int, default=16000)
-    parser.add_argument("--device", type=str, default="cpu")
-    args = parser.parse_args()
+    print("=== FID demo with synthetic audio ===")
+    tmp_a = os.path.join(os.path.dirname(__file__), "_tmp_a")
+    tmp_b = os.path.join(os.path.dirname(__file__), "_tmp_b")
+    os.makedirs(tmp_a, exist_ok=True)
+    os.makedirs(tmp_b, exist_ok=True)
 
-    if args.ref_dir and args.gen_dir:
-        fid = compute_fid(args.ref_dir, args.gen_dir, args.use_cnn14, args.sr, args.device)
-        print(f"FID = {fid:.4f}")
-    else:
-        print("=== FID demo with synthetic audio ===")
-        tmp_ref = os.path.join(os.path.dirname(__file__), "_tmp_ref")
-        tmp_gen = os.path.join(os.path.dirname(__file__), "_tmp_gen")
-        os.makedirs(tmp_ref, exist_ok=True)
-        os.makedirs(tmp_gen, exist_ok=True)
+    rng = np.random.default_rng(42)
+    sr = 16000
+    duration = 3
+    n_samples = 10
 
-        rng = np.random.default_rng(42)
-        sr = 16000
-        duration = 3
-        n_samples = 10
+    for i in range(n_samples):
+        t = np.linspace(0, duration, sr * duration, endpoint=False)
+        freq = 200 + i * 50
+        audio_a = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.05).astype(np.float32)
+        audio_b = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.3).astype(np.float32)
+        sf.write(os.path.join(tmp_a, f"{i}.wav"), audio_a, sr)
+        sf.write(os.path.join(tmp_b, f"{i}.wav"), audio_b, sr)
 
-        for i in range(n_samples):
-            t = np.linspace(0, duration, sr * duration, endpoint=False)
-            freq = 200 + i * 50
-            ref = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.05).astype(np.float32)
-            gen = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.3).astype(np.float32)
-            sf.write(os.path.join(tmp_ref, f"{i}.wav"), ref, sr)
-            sf.write(os.path.join(tmp_gen, f"{i}.wav"), gen, sr)
+    n_runs = 5
+    times = []
+    fid_values = []
+    model = load_cnn14(sr)
+    feat_a = get_embeddings(model, tmp_a, sr)
+    feat_b = get_embeddings(model, tmp_b, sr)
 
-        fid = compute_fid(tmp_ref, tmp_gen, use_cnn14=False, sr=sr)
-        print(f"FID (mel-based) = {fid:.4f}")
+    for r in range(n_runs):
+        t0 = time.time()
+        fid = calculate_fid(feat_a, feat_b)
+        elapsed = time.time() - t0
+        times.append(elapsed)
+        fid_values.append(fid)
+        print(f"  run {r+1}/{n_runs}: FID = {fid:.4f}, time = {elapsed:.4f}s")
 
-        import shutil
-        shutil.rmtree(tmp_ref)
-        shutil.rmtree(tmp_gen)
-        print("Temp dirs cleaned.")
+    print(f"\nFID mean = {np.mean(fid_values):.4f}")
+    print(f"Time mean = {np.mean(times):.4f}s (over {n_runs} runs)")
+
+    shutil.rmtree(tmp_a)
+    shutil.rmtree(tmp_b)
+    print("Temp dirs cleaned.")
