@@ -1,11 +1,10 @@
 import os
 import numpy as np
 import torch
-from torch import nn
 from scipy import linalg
 from scipy.signal import resample_poly
 from math import gcd
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import soundfile as sf
 
 
@@ -31,27 +30,42 @@ class WaveDataset(Dataset):
         return torch.from_numpy(wav)
 
 
-def load_vggish():
-    model = torch.hub.load("harritaylor/torchvggish", "vggish")
-    model.postprocess = False
-    model.embeddings = nn.Sequential(*list(model.embeddings.children())[:-1])
+def load_cnn14(sr=16000):
+    from audioldm_eval.feature_extractors.panns import Cnn14
+    if sr == 16000:
+        model = Cnn14(
+            features_list=["2048", "logits"],
+            sample_rate=16000, window_size=512, hop_size=160,
+            mel_bins=64, fmin=50, fmax=8000, classes_num=527,
+        )
+    elif sr == 32000:
+        model = Cnn14(
+            features_list=["2048", "logits"],
+            sample_rate=32000, window_size=1024, hop_size=320,
+            mel_bins=64, fmin=50, fmax=14000, classes_num=527,
+        )
+    else:
+        raise ValueError(f"Cnn14 only supports 16000/32000 Hz, got {sr}")
     model.eval()
     return model
 
 
-def get_embeddings(model, audio_dir, sr=16000):
+def get_embeddings(model, audio_dir, sr=16000, device="cpu"):
     dataset = WaveDataset(audio_dir, sr)
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+    model = model.to(device)
     embd_list = []
-    for i in range(len(dataset)):
-        audio = dataset[i].numpy()
-        embd = model.forward(audio, sr)
-        if embd.device.type == "cuda":
-            embd = embd.cpu()
-        embd_list.append(embd.detach().numpy())
-    return np.concatenate(embd_list, axis=0)
+    with torch.no_grad():
+        for wav in loader:
+            wav = wav.float().to(device)
+            out = model(wav)
+            embd_list.append(out["2048"].cpu())
+    return torch.cat(embd_list, dim=0)
 
 
 def calculate_statistics(embd):
+    if torch.is_tensor(embd):
+        embd = embd.numpy()
     mu = np.mean(embd, axis=0)
     sigma = np.cov(embd, rowvar=False)
     return mu, sigma
@@ -74,10 +88,10 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     return float(diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
 
 
-def compute_fad(dir_a, dir_b, sr=16000):
-    model = load_vggish()
-    embd_a = get_embeddings(model, dir_a, sr)
-    embd_b = get_embeddings(model, dir_b, sr)
+def compute_fad(dir_a, dir_b, sr=16000, device="cpu"):
+    model = load_cnn14(sr)
+    embd_a = get_embeddings(model, dir_a, sr, device)
+    embd_b = get_embeddings(model, dir_b, sr, device)
     mu_a, sigma_a = calculate_statistics(embd_a)
     mu_b, sigma_b = calculate_statistics(embd_b)
     return calculate_frechet_distance(mu_a, sigma_a, mu_b, sigma_b)
@@ -87,7 +101,7 @@ if __name__ == "__main__":
     import time
     import shutil
 
-    print("=== FAD demo with synthetic audio ===")
+    print("=== FAD demo (PANNs Cnn14, 2048-dim) ===")
     tmp_a = os.path.join(os.path.dirname(__file__), "_tmp_a")
     tmp_b = os.path.join(os.path.dirname(__file__), "_tmp_b")
     os.makedirs(tmp_a, exist_ok=True)
@@ -109,7 +123,7 @@ if __name__ == "__main__":
     n_runs = 5
     times = []
     fad_values = []
-    model = load_vggish()
+    model = load_cnn14(sr)
     embd_a = get_embeddings(model, tmp_a, sr)
     embd_b = get_embeddings(model, tmp_b, sr)
 
