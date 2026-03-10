@@ -449,6 +449,36 @@ class DDPM(pl.LightningModule):
             out = model(wav.to(self.device), None)
         return out["embedding"].cpu()
 
+    def _load_clap_model(self):
+        if self._clap_model is not None:
+            return self._clap_model
+        clap_dir = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), '..', '..', 'metrics', 'clapscore'))
+        if clap_dir not in sys.path:
+            sys.path.insert(0, clap_dir)
+        from models.clap_encoder import CLAP_Encoder
+        model = CLAP_Encoder(
+            pretrained_path=self.clap_ckpt_path,
+            sampling_rate=32000,
+            device=self.device,
+        ).eval()
+        self._clap_model = model
+        return model
+
+    def _clap_audio_embedding(self, wav, sr=16000):
+        model = self._load_clap_model()
+        if sr != 32000:
+            wav = torchaudio.functional.resample(wav, sr, 32000)
+        with torch.no_grad():
+            embed = model.get_query_embed(modality='audio', audio=wav.to(self.device), device=self.device)
+        return embed.cpu()
+
+    def _clap_text_embedding(self, text_list):
+        model = self._load_clap_model()
+        with torch.no_grad():
+            embed = model.get_query_embed(modality='text', text=text_list, device=self.device)
+        return embed.cpu()
+
     @staticmethod
     def _frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
         from scipy import linalg
@@ -469,6 +499,9 @@ class DDPM(pl.LightningModule):
     def on_validation_epoch_start(self):
         self._fad_ref_embs = []
         self._fad_pred_embs = []
+        self._clap_text_embs = []
+        self._clap_pred_audio_embs = []
+        self._clap_ref_audio_embs = []
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
@@ -534,6 +567,12 @@ class DDPM(pl.LightningModule):
                 if hasattr(self, "_fad_ref_embs") and self.panns_ckpt_path:
                     self._fad_ref_embs.append(self._panns_embedding(ref_t, sr=self.sampling_rate))
                     self._fad_pred_embs.append(self._panns_embedding(pred_t, sr=self.sampling_rate))
+                if hasattr(self, "_clap_text_embs") and self.clap_ckpt_path:
+                    self._clap_pred_audio_embs.append(self._clap_audio_embedding(pred_t, sr=self.sampling_rate))
+                    self._clap_ref_audio_embs.append(self._clap_audio_embedding(ref_t, sr=self.sampling_rate))
+                    captions = batch.get("caption", batch.get("text", []))
+                    if captions and any(c != "" for c in captions):
+                        self._clap_text_embs.append(self._clap_text_embedding(captions))
             except Exception as e:
                 raise RuntimeError(f"Failed in validation metric computation: {e}")
 
@@ -560,6 +599,24 @@ class DDPM(pl.LightningModule):
                 raise RuntimeError(f"Failed to compute FAD: {e}")
         self._fad_ref_embs = []
         self._fad_pred_embs = []
+
+        if hasattr(self, "_clap_pred_audio_embs") and len(self._clap_pred_audio_embs) > 0:
+            try:
+                import torch.nn.functional as F
+                pred_audio_all = torch.cat(self._clap_pred_audio_embs, dim=0)
+                ref_audio_all = torch.cat(self._clap_ref_audio_embs, dim=0)
+                clapscore_a = F.cosine_similarity(pred_audio_all, ref_audio_all, dim=1).mean().item()
+                self.log("val/clapscore_a", clapscore_a, prog_bar=False, logger=True)
+                if len(self._clap_text_embs) > 0:
+                    text_all = torch.cat(self._clap_text_embs, dim=0)
+                    min_n = min(text_all.shape[0], pred_audio_all.shape[0])
+                    clapscore = (text_all[:min_n] * pred_audio_all[:min_n]).sum(-1).mean().item()
+                    self.log("val/clapscore", clapscore, prog_bar=False, logger=True)
+            except Exception as e:
+                raise RuntimeError(f"Failed to compute CLAPScore: {e}")
+        self._clap_text_embs = []
+        self._clap_pred_audio_embs = []
+        self._clap_ref_audio_embs = []
 
     def get_validation_folder_name(self):
         return "val_%s_cfg_scale_%s_ddim_%s_n_cand_%s" % (self.global_step, self.evaluation_params["unconditional_guidance_scale"], self.evaluation_params["ddim_sampling_steps"], self.evaluation_params["n_candidates_per_samples"])
@@ -643,6 +700,7 @@ class LatentDiffusion(DDPM):
         data_prediction=False,
         use_ei_solver=False,
         panns_ckpt_path=None,
+        clap_ckpt_path=None,
         *args,
         **kwargs,
     ):
@@ -663,6 +721,8 @@ class LatentDiffusion(DDPM):
         self.use_ei_solver = use_ei_solver
         self.panns_ckpt_path = panns_ckpt_path
         self._panns_model = None
+        self.clap_ckpt_path = clap_ckpt_path
+        self._clap_model = None
         assert self.num_timesteps_cond <= kwargs["timesteps"]
 
         if conditioning_key is None:
