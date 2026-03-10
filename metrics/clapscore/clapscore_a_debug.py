@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "CLAPScore_for_LASS"))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from models.clap_encoder import CLAP_Encoder
 
