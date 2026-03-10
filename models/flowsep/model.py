@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -414,26 +415,56 @@ class DDPM(pl.LightningModule):
         e_noise = est - s_target
         return 10 * torch.log10(s_target.pow(2).sum(dim=-1) / (e_noise.pow(2).sum(dim=-1) + 1e-8) + 1e-8)
 
-    @staticmethod
-    def _mel_embedding(wav, sr=16000, n_mels=128, n_fft=1024, hop=160):
-        mel_fn = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sr, n_fft=n_fft, hop_length=hop, n_mels=n_mels
+    def _load_panns_model(self):
+        if self._panns_model is not None:
+            return self._panns_model
+        import importlib.util
+        fad_dir = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), '..', '..', 'metrics', 'fad'))
+        pu_spec = importlib.util.spec_from_file_location(
+            "_panns_pytorch_utils", os.path.join(fad_dir, "pytorch_utils.py"))
+        pu_mod = importlib.util.module_from_spec(pu_spec)
+        sys.modules["pytorch_utils"] = pu_mod
+        pu_spec.loader.exec_module(pu_mod)
+        m_spec = importlib.util.spec_from_file_location(
+            "_panns_models", os.path.join(fad_dir, "models.py"))
+        m_mod = importlib.util.module_from_spec(m_spec)
+        m_spec.loader.exec_module(m_mod)
+        model = m_mod.Cnn14_16k(
+            sample_rate=16000, window_size=512, hop_size=160,
+            mel_bins=64, fmin=50, fmax=8000, classes_num=527,
         )
-        mel = mel_fn(wav)
-        log_mel = torch.log(mel.clamp(min=1e-7))
-        return log_mel.mean(dim=-1)
+        ckpt = torch.load(self.panns_ckpt_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        model.to(self.device)
+        model.eval()
+        self._panns_model = model
+        return model
+
+    def _panns_embedding(self, wav, sr=16000):
+        model = self._load_panns_model()
+        if sr != 16000:
+            wav = torchaudio.functional.resample(wav, sr, 16000)
+        with torch.no_grad():
+            out = model(wav.to(self.device), None)
+        return out["embedding"].cpu()
 
     @staticmethod
     def _frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
-        from scipy.linalg import sqrtm
-        mu1, mu2 = mu1.numpy(), mu2.numpy()
-        sigma1 = sigma1.numpy() + eps * np.eye(sigma1.shape[0])
-        sigma2 = sigma2.numpy() + eps * np.eye(sigma2.shape[0])
+        from scipy import linalg
+        mu1 = np.atleast_1d(mu1)
+        mu2 = np.atleast_1d(mu2)
+        sigma1 = np.atleast_2d(sigma1)
+        sigma2 = np.atleast_2d(sigma2)
         diff = mu1 - mu2
-        covmean, _ = sqrtm(sigma1 @ sigma2, disp=False)
+        covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+        if not np.isfinite(covmean).all():
+            offset = np.eye(sigma1.shape[0]) * eps
+            covmean = linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
         if np.iscomplexobj(covmean):
             covmean = covmean.real
-        return float(diff @ diff + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean))
+        tr_covmean = np.trace(covmean)
+        return float(diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
 
     def on_validation_epoch_start(self):
         self._fad_ref_embs = []
@@ -500,9 +531,9 @@ class DDPM(pl.LightningModule):
                         loss_dict[f"val/dnsmos_{k}"] = float(np.mean(v))
                 except Exception as e:
                     raise RuntimeError(f"Failed to compute DNSMOS scores: {e}")
-                if hasattr(self, "_fad_ref_embs"):
-                    self._fad_ref_embs.append(self._mel_embedding(ref_t, sr=self.sampling_rate))
-                    self._fad_pred_embs.append(self._mel_embedding(pred_t, sr=self.sampling_rate))
+                if hasattr(self, "_fad_ref_embs") and self.panns_ckpt_path:
+                    self._fad_ref_embs.append(self._panns_embedding(ref_t, sr=self.sampling_rate))
+                    self._fad_pred_embs.append(self._panns_embedding(pred_t, sr=self.sampling_rate))
             except Exception as e:
                 raise RuntimeError(f"Failed in validation metric computation: {e}")
 
@@ -517,11 +548,12 @@ class DDPM(pl.LightningModule):
     def on_validation_epoch_end(self):
         if hasattr(self, "_fad_ref_embs") and len(self._fad_ref_embs) > 0:
             try:
-                ref_all = torch.cat(self._fad_ref_embs, dim=0)
-                pred_all = torch.cat(self._fad_pred_embs, dim=0)
-                mu_r, mu_p = ref_all.mean(0), pred_all.mean(0)
-                sigma_r = torch.cov(ref_all.T)
-                sigma_p = torch.cov(pred_all.T)
+                ref_all = torch.cat(self._fad_ref_embs, dim=0).numpy()
+                pred_all = torch.cat(self._fad_pred_embs, dim=0).numpy()
+                mu_r = np.mean(ref_all, axis=0)
+                mu_p = np.mean(pred_all, axis=0)
+                sigma_r = np.cov(ref_all, rowvar=False)
+                sigma_p = np.cov(pred_all, rowvar=False)
                 fad = self._frechet_distance(mu_r, sigma_r, mu_p, sigma_p)
                 self.log("val/fad", fad, prog_bar=False, logger=True)
             except Exception as e:
@@ -610,6 +642,7 @@ class LatentDiffusion(DDPM):
         sb_rho=1.0,
         data_prediction=False,
         use_ei_solver=False,
+        panns_ckpt_path=None,
         *args,
         **kwargs,
     ):
@@ -628,6 +661,8 @@ class LatentDiffusion(DDPM):
         self.sb_rho = sb_rho
         self.data_prediction = data_prediction
         self.use_ei_solver = use_ei_solver
+        self.panns_ckpt_path = panns_ckpt_path
+        self._panns_model = None
         assert self.num_timesteps_cond <= kwargs["timesteps"]
 
         if conditioning_key is None:
