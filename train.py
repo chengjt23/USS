@@ -226,6 +226,8 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config_yaml", type=str, default="configs/flowsep/flowsep.yaml", help="path to config")
+    parser.add_argument("--panns_ckpt_path", type=str,
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "metrics", "fad", "Cnn14_16k_mAP=0.438.pth"))
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA is not available"
@@ -237,4 +239,5 @@ if __name__ == "__main__":
     with open(config_yaml_path, "r") as f:
         configs = yaml.load(f, Loader=yaml.FullLoader)
 
+    configs["model"]["params"]["panns_ckpt_path"] = args.panns_ckpt_path
     main(configs, config_yaml_path, exp_group_name, exp_name)
