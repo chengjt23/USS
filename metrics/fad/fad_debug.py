@@ -3,8 +3,10 @@ import numpy as np
 import torch
 from torch import nn
 from scipy import linalg
+from scipy.signal import resample_poly
+from math import gcd
 from torch.utils.data import Dataset, DataLoader
-import torchaudio
+import soundfile as sf
 
 
 class WaveDataset(Dataset):
@@ -20,10 +22,13 @@ class WaveDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        wav, orig_sr = torchaudio.load(self.files[idx])
+        wav, orig_sr = sf.read(self.files[idx], dtype="float32")
+        if wav.ndim > 1:
+            wav = wav[:, 0]
         if orig_sr != self.sr:
-            wav = torchaudio.functional.resample(wav, orig_sr, self.sr)
-        return wav[0]
+            g = gcd(orig_sr, self.sr)
+            wav = resample_poly(wav, self.sr // g, orig_sr // g).astype(np.float32)
+        return torch.from_numpy(wav)
 
 
 def load_vggish():
@@ -47,6 +52,7 @@ def get_embeddings_vggish(model, audio_dir, sr=16000):
 
 
 def get_embeddings_mel(audio_dir, sr=16000, n_mels=128, n_fft=1024, hop=160):
+    import torchaudio
     dataset = WaveDataset(audio_dir, sr)
     mel_fn = torchaudio.transforms.MelSpectrogram(
         sample_rate=sr, n_fft=n_fft, hop_length=hop, n_mels=n_mels
@@ -127,8 +133,8 @@ if __name__ == "__main__":
             freq = 200 + i * 50
             ref = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.05).astype(np.float32)
             gen = (np.sin(2 * np.pi * freq * t) * 0.5 + rng.standard_normal(sr * duration).astype(np.float32) * 0.3).astype(np.float32)
-            torchaudio.save(os.path.join(tmp_ref, f"{i}.wav"), torch.from_numpy(ref).unsqueeze(0), sr)
-            torchaudio.save(os.path.join(tmp_gen, f"{i}.wav"), torch.from_numpy(gen).unsqueeze(0), sr)
+            sf.write(os.path.join(tmp_ref, f"{i}.wav"), ref, sr)
+            sf.write(os.path.join(tmp_gen, f"{i}.wav"), gen, sr)
 
         fad = compute_fad(tmp_ref, tmp_gen, use_vggish=False, sr=sr)
         print(f"FAD (mel-based) = {fad:.4f}")
