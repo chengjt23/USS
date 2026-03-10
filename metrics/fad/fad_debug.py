@@ -49,7 +49,7 @@ def load_cnn14(checkpoint_path, sr=16000, device="cpu"):
     else:
         raise ValueError(f"Cnn14 only supports 16000/32000 Hz, got {sr}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model"])
     model.to(device)
     model.eval()
