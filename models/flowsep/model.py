@@ -483,7 +483,7 @@ class DDPM(pl.LightningModule):
                 except Exception as e:
                     raise RuntimeError(f"Failed to compute PESQ scores: {e}")
                 try:
-                    from dnsmos.dnsmos_debug import compute_dnsmos, PRIMARY_MODEL, P808_MODEL
+                    from metrics.dnsmos.dnsmos_debug import compute_dnsmos, PRIMARY_MODEL, P808_MODEL
                     if not hasattr(self, '_dnsmos_primary_sess'):
                         import onnxruntime as ort
                         self._dnsmos_primary_sess = ort.InferenceSession(PRIMARY_MODEL, providers=["CPUExecutionProvider"])
