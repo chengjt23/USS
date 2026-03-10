@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import torch
 from scipy import linalg
@@ -6,6 +7,8 @@ from scipy.signal import resample_poly
 from math import gcd
 from torch.utils.data import Dataset, DataLoader
 import soundfile as sf
+
+sys.path.insert(0, os.path.dirname(__file__))
 
 
 class WaveDataset(Dataset):
@@ -30,22 +33,25 @@ class WaveDataset(Dataset):
         return torch.from_numpy(wav)
 
 
-def load_cnn14(sr=16000):
-    from audioldm_eval.feature_extractors.panns import Cnn14
+def load_cnn14(checkpoint_path, sr=16000, device="cpu"):
+    from models import Cnn14, Cnn14_16k
+
     if sr == 16000:
-        model = Cnn14(
-            features_list=["2048", "logits"],
+        model = Cnn14_16k(
             sample_rate=16000, window_size=512, hop_size=160,
             mel_bins=64, fmin=50, fmax=8000, classes_num=527,
         )
     elif sr == 32000:
         model = Cnn14(
-            features_list=["2048", "logits"],
             sample_rate=32000, window_size=1024, hop_size=320,
             mel_bins=64, fmin=50, fmax=14000, classes_num=527,
         )
     else:
         raise ValueError(f"Cnn14 only supports 16000/32000 Hz, got {sr}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model"])
+    model.to(device)
     model.eval()
     return model
 
@@ -53,13 +59,12 @@ def load_cnn14(sr=16000):
 def get_embeddings(model, audio_dir, sr=16000, device="cpu"):
     dataset = WaveDataset(audio_dir, sr)
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
-    model = model.to(device)
     embd_list = []
     with torch.no_grad():
         for wav in loader:
             wav = wav.float().to(device)
-            out = model(wav)
-            embd_list.append(out["2048"].cpu())
+            out = model(wav, None)
+            embd_list.append(out["embedding"].cpu())
     return torch.cat(embd_list, dim=0)
 
 
@@ -88,8 +93,8 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     return float(diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
 
 
-def compute_fad(dir_a, dir_b, sr=16000, device="cpu"):
-    model = load_cnn14(sr)
+def compute_fad(dir_a, dir_b, checkpoint_path, sr=16000, device="cpu"):
+    model = load_cnn14(checkpoint_path, sr, device)
     embd_a = get_embeddings(model, dir_a, sr, device)
     embd_b = get_embeddings(model, dir_b, sr, device)
     mu_a, sigma_a = calculate_statistics(embd_a)
@@ -100,15 +105,22 @@ def compute_fad(dir_a, dir_b, sr=16000, device="cpu"):
 if __name__ == "__main__":
     import time
     import shutil
+    import argparse
 
-    print("=== FAD demo (PANNs Cnn14, 2048-dim) ===")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint_path", type=str, required=True)
+    parser.add_argument("--sr", type=int, default=16000)
+    parser.add_argument("--device", type=str, default="cpu")
+    args = parser.parse_args()
+
+    print(f"=== FAD demo (PANNs Cnn14, 2048-dim, sr={args.sr}) ===")
     tmp_a = os.path.join(os.path.dirname(__file__), "_tmp_a")
     tmp_b = os.path.join(os.path.dirname(__file__), "_tmp_b")
     os.makedirs(tmp_a, exist_ok=True)
     os.makedirs(tmp_b, exist_ok=True)
 
     rng = np.random.default_rng(42)
-    sr = 16000
+    sr = args.sr
     duration = 3
     n_samples = 10
 
@@ -123,9 +135,10 @@ if __name__ == "__main__":
     n_runs = 5
     times = []
     fad_values = []
-    model = load_cnn14(sr)
-    embd_a = get_embeddings(model, tmp_a, sr)
-    embd_b = get_embeddings(model, tmp_b, sr)
+    model = load_cnn14(args.checkpoint_path, sr, args.device)
+    embd_a = get_embeddings(model, tmp_a, sr, args.device)
+    embd_b = get_embeddings(model, tmp_b, sr, args.device)
+    print(f"Embedding shape: {embd_a.shape}")
 
     for r in range(n_runs):
         t0 = time.time()
