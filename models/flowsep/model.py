@@ -446,8 +446,8 @@ class DDPM(pl.LightningModule):
         if sr != 16000:
             wav = torchaudio.functional.resample(wav, sr, 16000)
         with torch.no_grad():
-            out = model(wav.to(self.device), None)
-        return out["embedding"].cpu()
+            out = model(wav.float().to(self.device), None)
+        return out["embedding"].float().cpu()
 
     def _load_clap_model(self):
         if self._clap_model is not None:
@@ -470,8 +470,8 @@ class DDPM(pl.LightningModule):
         if sr != 32000:
             wav = torchaudio.functional.resample(wav, sr, 32000)
         with torch.no_grad():
-            embed = model.get_query_embed(modality='audio', audio=wav.to(self.device), device=self.device)
-        return embed.cpu()
+            embed = model.get_query_embed(modality='audio', audio=wav.float().to(self.device), device=self.device)
+        return embed.float().cpu()
 
     def _clap_text_embedding(self, text_list):
         model = self._load_clap_model()
@@ -587,8 +587,8 @@ class DDPM(pl.LightningModule):
     def on_validation_epoch_end(self):
         if hasattr(self, "_fad_ref_embs") and len(self._fad_ref_embs) > 0:
             try:
-                ref_all = torch.cat(self._fad_ref_embs, dim=0).numpy()
-                pred_all = torch.cat(self._fad_pred_embs, dim=0).numpy()
+                ref_all = torch.cat(self._fad_ref_embs, dim=0).float().numpy()
+                pred_all = torch.cat(self._fad_pred_embs, dim=0).float().numpy()
                 mu_r = np.mean(ref_all, axis=0)
                 mu_p = np.mean(pred_all, axis=0)
                 sigma_r = np.cov(ref_all, rowvar=False)
