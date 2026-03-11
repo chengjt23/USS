@@ -69,7 +69,7 @@ model:
     euler: true
     bridge_mode: true
     sb_schedule: true
-    sb_rho: 4.0
+    sb_rho: 2.0
     data_prediction: true
     use_ei_solver: false
     unet_config:
