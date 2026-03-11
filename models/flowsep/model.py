@@ -699,6 +699,7 @@ class LatentDiffusion(DDPM):
         sb_rho=1.0,
         data_prediction=False,
         use_ei_solver=False,
+        logit_normal_t=0.0,
         panns_ckpt_path=None,
         clap_ckpt_path=None,
         *args,
@@ -719,6 +720,7 @@ class LatentDiffusion(DDPM):
         self.sb_rho = sb_rho
         self.data_prediction = data_prediction
         self.use_ei_solver = use_ei_solver
+        self.logit_normal_t = logit_normal_t
         self.panns_ckpt_path = panns_ckpt_path
         self._panns_model = None
         self.clap_ckpt_path = clap_ckpt_path
@@ -1130,7 +1132,10 @@ class LatentDiffusion(DDPM):
         return loss
 
     def forward(self, x, c, *args, **kwargs):
-        t = torch.rand([x.shape[0]], device=self.device)
+        if self.logit_normal_t > 0:
+            t = torch.sigmoid(torch.randn([x.shape[0]], device=self.device) * self.logit_normal_t)
+        else:
+            t = torch.rand([x.shape[0]], device=self.device)
 
         loss, loss_dict = self.p_losses(x, c, t, *args, **kwargs)
         return loss, loss_dict
