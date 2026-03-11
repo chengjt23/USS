@@ -71,7 +71,7 @@ model:
     sb_schedule: true
     sb_rho: 2.0
     data_prediction: true
-    use_ei_solver: false
+    use_ei_solver: true
     unet_config:
       target: models.flowsep.unet.UNetModel
       params:
