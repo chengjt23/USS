@@ -400,7 +400,7 @@ class DDPM(pl.LightningModule):
         return super().on_validation_epoch_start()
     
     def on_train_epoch_start(self, *args, **kwargs):
-        print("Log directory: ", self.get_log_dir())
+        pass
 
     def on_train_batch_end(self, *args, **kwargs):
         if self.use_ema:
@@ -514,8 +514,10 @@ class DDPM(pl.LightningModule):
             ],
             ddim_steps=self.evaluation_params["ddim_sampling_steps"],
             n_gen=self.evaluation_params["n_candidates_per_samples"],
+            save=False,
+            save_mixed=False,
         )
-        loss, loss_dict = self.shared_step(batch)
+        loss_dict = {}
 
         if waveform is not None:
             try:
@@ -529,23 +531,6 @@ class DDPM(pl.LightningModule):
                 ref_t, pred_t = ref[..., :min_len], pred[..., :min_len]
                 si_sdr_val = self._si_sdr_batch(ref_t, pred_t).mean()
                 loss_dict["val/si_sdr"] = si_sdr_val.item()
-                try:
-                    from pesq import pesq as pesq_fn
-                    pesq_scores = []
-                    for i in range(ref_t.shape[0]):
-                        r = ref_t[i].numpy().astype(np.float64)
-                        e = pred_t[i].numpy().astype(np.float64)
-                        if self.sampling_rate != 16000:
-                            r = torchaudio.functional.resample(torch.from_numpy(r), self.sampling_rate, 16000).numpy()
-                            e = torchaudio.functional.resample(torch.from_numpy(e), self.sampling_rate, 16000).numpy()
-                        try:
-                            pesq_scores.append(pesq_fn(16000, r.astype(np.float32), e.astype(np.float32), "wb"))
-                        except Exception:
-                            continue
-                    if len(pesq_scores) > 0:
-                        loss_dict["val/pesq"] = float(np.mean(pesq_scores))
-                except Exception as e:
-                    raise RuntimeError(f"Failed to compute PESQ scores: {e}")
                 try:
                     from metrics.dnsmos.dnsmos_debug import compute_dnsmos, PRIMARY_MODEL, P808_MODEL
                     if not hasattr(self, '_dnsmos_primary_sess'):
@@ -580,7 +565,7 @@ class DDPM(pl.LightningModule):
         {k: float(v) for k, v in loss_dict.items()},
         prog_bar=True,
         logger=True,
-        on_step=True,
+        on_step=False,
         on_epoch=True,
         )
 
@@ -1420,16 +1405,12 @@ class LatentDiffusion(DDPM):
         except:
             waveform_save_path = name
         os.makedirs(waveform_save_path, exist_ok=True)
-        print("Waveform save path: ", waveform_save_path)
 
         if (
             "audiocaps" in waveform_save_path
             and len(os.listdir(waveform_save_path)) >= 964
         ):
-            print("The evaluation has already been done at %s" % waveform_save_path)
             return waveform_save_path
-
-        print(f"samplying with {ddim_steps} steps")
 
         with self.ema_scope("Plotting"):
             for i, batch in enumerate(batchs):
@@ -1512,13 +1493,7 @@ class LatentDiffusion(DDPM):
                 if self.data_std:
                     mel = (mel * self.data_std) + self.data_mean
 
-                min_val = mel.min()
-                max_val = mel.max()
-                norm = (mel - min_val) / (max_val - min_val)
-                adj = norm * -14
-
                 waveform = self.mel_spectrogram_to_waveform(mel, savepath=waveform_save_path, bs=None, name=fnames, save=False)
-                print(f"ngen is {n_gen} and retrival is {self.use_retrival}")
                 if n_gen >= 3:
                     if self.use_clap: 
                         try: 
@@ -1532,9 +1507,6 @@ class LatentDiffusion(DDPM):
                                 max_index = torch.argmax(candidates).item()
                                 best_index.append(i + max_index * z.shape[0])
                             waveform = waveform[best_index]
-
-                            print("Similarity between generated audio and text", similarity)
-                            print("Choose the following indexes:", best_index)
                         except Exception as e:
                             print("Warning: while calculating CLAP score (not fatal), ", e)
                     else:
