@@ -700,6 +700,8 @@ class LatentDiffusion(DDPM):
         data_prediction=False,
         use_ei_solver=False,
         logit_normal_t=0.0,
+        asym_noise=False,
+        loss_t_weight=0.0,
         panns_ckpt_path=None,
         clap_ckpt_path=None,
         *args,
@@ -721,6 +723,8 @@ class LatentDiffusion(DDPM):
         self.data_prediction = data_prediction
         self.use_ei_solver = use_ei_solver
         self.logit_normal_t = logit_normal_t
+        self.asym_noise = asym_noise
+        self.loss_t_weight = loss_t_weight
         self.panns_ckpt_path = panns_ckpt_path
         self._panns_model = None
         self.clap_ckpt_path = clap_ckpt_path
@@ -1160,13 +1164,19 @@ class LatentDiffusion(DDPM):
 
         if self.bridge_mode and channel != self.channels:
             if self.sb_schedule:
-                sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
+                if self.asym_noise:
+                    sigma_bb = self.sb_rho * torch.sqrt(spr_t + 1e-8) * (1 - spr_t)
+                else:
+                    sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
                 x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + sigma_bb * noise
             else:
                 x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + self.sigma_min * noise
             target = x_start if self.data_prediction else x_start - x_extra
         elif self.sb_schedule:
-            sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
+            if self.asym_noise:
+                sigma_bb = self.sb_rho * torch.sqrt(spr_t + 1e-8) * (1 - spr_t)
+            else:
+                sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
             noise_extra = torch.randn_like(x_start)
             x_noisy = (1 - (1 - self.sigma_min) * spr_t) * noise + spr_t * x_start + sigma_bb * noise_extra
             target = x_start if self.data_prediction else x_start - (1 - self.sigma_min) * noise
@@ -1188,6 +1198,12 @@ class LatentDiffusion(DDPM):
             loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2])
         else:
             loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
+
+        if self.loss_t_weight > 0:
+            t_w = t.pow(self.loss_t_weight) / (1 - t + 1e-4)
+            t_w = t_w / (t_w.mean() + 1e-8)
+            loss_simple = loss_simple * t_w
+
         loss_dict.update({f"{prefix}/loss_simple": loss_simple.mean()})
 
         t_int = (t * 1000).long()
@@ -1324,15 +1340,16 @@ class LatentDiffusion(DDPM):
             model_out = self._model_forward(x, t_batch, cond, x_T)
 
             if self.bridge_mode and self.sb_schedule and self.data_prediction and x_T is not None:
-                rho_p = rho * torch.sqrt(1 - t_prev + 1e-8)
-                rho_c = rho * torch.sqrt(1 - t_curr + 1e-8)
-                rho_T = rho
-                rho_bar_p = torch.sqrt(rho_T ** 2 - rho_p ** 2 + 1e-8)
-                rho_bar_c = torch.sqrt(rho_T ** 2 - rho_c ** 2 + 1e-8)
-
-                w_x = (rho_c * rho_bar_c / (rho_p * rho_bar_p + 1e-8)).view(1, 1, 1, 1)
-                w_s = ((rho_bar_c ** 2 - rho_bar_p * rho_c * rho_bar_c / (rho_p + 1e-8)) / (rho_T ** 2 + 1e-8)).view(1, 1, 1, 1)
-                w_y = ((rho_c ** 2 - rho_p * rho_c * rho_bar_c / (rho_bar_p + 1e-8)) / (rho_T ** 2 + 1e-8)).view(1, 1, 1, 1)
+                if self.asym_noise:
+                    sigma_p = torch.sqrt(t_prev + 1e-8) * (1 - t_prev)
+                    sigma_c = torch.sqrt(t_curr + 1e-8) * (1 - t_curr)
+                else:
+                    sigma_p = torch.sqrt(t_prev * (1 - t_prev) + 1e-8)
+                    sigma_c = torch.sqrt(t_curr * (1 - t_curr) + 1e-8)
+                R = (sigma_c / (sigma_p + 1e-8)).view(1, 1, 1, 1)
+                w_x = R
+                w_s = t_curr.view(1, 1, 1, 1) - R * t_prev.view(1, 1, 1, 1)
+                w_y = (1 - t_curr).view(1, 1, 1, 1) - R * (1 - t_prev).view(1, 1, 1, 1)
                 x = w_x * x + w_s * model_out + w_y * x_T
             else:
                 dphi_dt = self._to_velocity(model_out, x, t_batch, x_T)
