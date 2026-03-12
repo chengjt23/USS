@@ -250,15 +250,11 @@ class DDPM(pl.LightningModule):
         if self.use_ema:
             self.model_ema.store(self.model.parameters())
             self.model_ema.copy_to(self.model)
-            if context is not None:
-                print(f"{context}: Switched to EMA weights")
         try:
             yield None
         finally:
             if self.use_ema:
                 self.model_ema.restore(self.model.parameters())
-                if context is not None:
-                    print(f"{context}: Restored training weights")
 
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
         sd = torch.load(path, map_location="cpu")
