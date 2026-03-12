@@ -769,6 +769,12 @@ class LatentDiffusion(DDPM):
             self.init_from_ckpt(ckpt_path, ignore_keys)
             self.restarted_from_ckpt = True
 
+    def on_load_checkpoint(self, checkpoint):
+        state_dict = checkpoint.get("state_dict", {})
+        keys_to_remove = [k for k in state_dict if k.startswith("_panns_model.") or k.startswith("_clap_model.")]
+        for k in keys_to_remove:
+            del state_dict[k]
+
     def configure_optimizers(self):
         lr = self.learning_rate
         params = list(self.model.parameters())
