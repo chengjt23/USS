@@ -687,6 +687,7 @@ class LatentDiffusion(DDPM):
         logit_normal_t=0.0,
         asym_noise=False,
         loss_t_weight=0.0,
+        reparam_bridge=False,
         panns_ckpt_path=None,
         clap_ckpt_path=None,
         *args,
@@ -710,6 +711,7 @@ class LatentDiffusion(DDPM):
         self.logit_normal_t = logit_normal_t
         self.asym_noise = asym_noise
         self.loss_t_weight = loss_t_weight
+        self.reparam_bridge = reparam_bridge
         self.panns_ckpt_path = panns_ckpt_path
         self._panns_model = None
         self.clap_ckpt_path = clap_ckpt_path
@@ -1159,7 +1161,10 @@ class LatentDiffusion(DDPM):
                     sigma_bb = self.sb_rho * torch.sqrt(spr_t + 1e-8) * (1 - spr_t)
                 else:
                     sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
-                x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + sigma_bb * noise
+                if self.reparam_bridge:
+                    x_noisy = spr_t * x_start + sigma_bb * noise
+                else:
+                    x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + sigma_bb * noise
             else:
                 x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + self.sigma_min * noise
             target = x_start if self.data_prediction else x_start - x_extra
@@ -1315,7 +1320,9 @@ class LatentDiffusion(DDPM):
             C, L = shape
             size = (batch_size, C, L)
 
-        if self.bridge_mode and x_T is not None:
+        if self.reparam_bridge:
+            x = torch.zeros(size, device=self.device)
+        elif self.bridge_mode and x_T is not None:
             x = x_T.clone()
         else:
             x = torch.randn(size, device=self.device) * temperature
@@ -1338,10 +1345,12 @@ class LatentDiffusion(DDPM):
                     sigma_p = torch.sqrt(t_prev * (1 - t_prev) + 1e-8)
                     sigma_c = torch.sqrt(t_curr * (1 - t_curr) + 1e-8)
                 R = (sigma_c / (sigma_p + 1e-8)).view(1, 1, 1, 1)
-                w_x = R
                 w_s = t_curr.view(1, 1, 1, 1) - R * t_prev.view(1, 1, 1, 1)
-                w_y = (1 - t_curr).view(1, 1, 1, 1) - R * (1 - t_prev).view(1, 1, 1, 1)
-                x = w_x * x + w_s * model_out + w_y * x_T
+                if self.reparam_bridge:
+                    x = R * x + w_s * model_out
+                else:
+                    w_y = (1 - t_curr).view(1, 1, 1, 1) - R * (1 - t_prev).view(1, 1, 1, 1)
+                    x = R * x + w_s * model_out + w_y * x_T
             else:
                 dphi_dt = self._to_velocity(model_out, x, t_batch, x_T)
                 dt = t_curr - t_prev
