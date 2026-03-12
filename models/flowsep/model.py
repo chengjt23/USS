@@ -1134,6 +1134,9 @@ class LatentDiffusion(DDPM):
         else:
             t = torch.rand([x.shape[0]], device=self.device)
 
+        if self.reparam_bridge:
+            t = t.clamp(min=1e-3, max=1 - 1e-3)
+
         loss, loss_dict = self.p_losses(x, c, t, *args, **kwargs)
         return loss, loss_dict
 
