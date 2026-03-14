@@ -12,7 +12,7 @@ def hold_gpus(ratio=0.9):
     tensors = []
     for i in range(torch.cuda.device_count()):
         torch.cuda.set_device(i)
-        total = torch.cuda.get_device_properties(i).total_mem
+        total = torch.cuda.get_device_properties(i).total_memory
         alloc = int(total * ratio)
         try:
             t = torch.empty(alloc // 4, dtype=torch.float32, device=f"cuda:{i}")
