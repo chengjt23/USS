@@ -375,19 +375,31 @@ class DDPM(pl.LightningModule):
         if self.initial_learning_rate is None:
             self.initial_learning_rate = self.learning_rate
 
-        if self.global_step <= 1000:
-            if self.global_step == 0:
-                print(
-                    "Warming up learning rate start with %s"
-                    % self.initial_learning_rate
-                )
-            self.trainer.optimizers[0].param_groups[0]["lr"] = (
-                self.global_step / 1000
-            ) * self.initial_learning_rate
+        step = self.global_step
+        warmup_steps = self.lr_warmup_steps
+        max_lr = self.lr_max
+        min_lr = self.lr_min
+        decay_until = self.lr_decay_until_step
+
+        if step == 0:
+            print("Warming up learning rate start with %s" % self.initial_learning_rate)
+
+        if decay_until is not None:
+            import math
+            if step < warmup_steps:
+                lr = max_lr * step / warmup_steps
+            elif step > decay_until:
+                lr = min_lr
+            else:
+                ratio = (step - warmup_steps) / (decay_until - warmup_steps)
+                lr = min_lr + 0.5 * (1.0 + math.cos(math.pi * ratio)) * (max_lr - min_lr)
         else:
-            self.trainer.optimizers[0].param_groups[0][
-                "lr"
-            ] = self.initial_learning_rate
+            if step <= warmup_steps:
+                lr = (step / warmup_steps) * self.initial_learning_rate
+            else:
+                lr = self.initial_learning_rate
+
+        self.trainer.optimizers[0].param_groups[0]["lr"] = lr
 
     def on_validation_epoch_start(self) -> None:
         for key in self.cond_stage_model_metadata.keys():
@@ -686,6 +698,10 @@ class LatentDiffusion(DDPM):
         reparam_bridge=False,
         panns_ckpt_path=None,
         clap_ckpt_path=None,
+        lr_warmup_steps=1000,
+        lr_max=None,
+        lr_min=None,
+        lr_decay_until_step=None,
         *args,
         **kwargs,
     ):
@@ -694,6 +710,10 @@ class LatentDiffusion(DDPM):
         self.clap_trainable = clap_trainable
         self.retrival_num = retrival_num
         self.learning_rate = base_learning_rate
+        self.lr_warmup_steps = lr_warmup_steps
+        self.lr_max = lr_max if lr_max is not None else base_learning_rate
+        self.lr_min = lr_min if lr_min is not None else base_learning_rate
+        self.lr_decay_until_step = lr_decay_until_step
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
         self.scale_by_std = scale_by_std
         self.evaluation_params = evaluation_params
