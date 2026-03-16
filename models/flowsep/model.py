@@ -1245,6 +1245,7 @@ class LatentDiffusion(DDPM):
                     if self.learnable_prior:
                         text_emb = cond["crossattn_text"][0] if self.prior_use_text else None
                         prior_out = self.prior_lambda * self.prior_net(x_extra, text_emb)
+                        prior_mse = F.mse_loss(prior_out, x_start)
                         x_noisy = (1 - spr_t) * prior_out + spr_t * x_start + sigma_bb * noise
                     else:
                         x_noisy = spr_t * x_start + sigma_bb * noise
@@ -1305,6 +1306,9 @@ class LatentDiffusion(DDPM):
         loss_dict.update({f"{prefix}/loss_vlb": loss_vlb})
         loss += self.original_elbo_weight * loss_vlb
         loss_dict.update({f"{prefix}/loss": loss})
+
+        if self.learnable_prior and self.bridge_mode and channel != self.channels:
+            loss_dict.update({f"{prefix}/prior_mse": prior_mse.detach()})
 
         return loss, loss_dict
 
