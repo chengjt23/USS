@@ -10,7 +10,7 @@ datamodule:
     train_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/train
     val_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/val
     test_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/test
-    sample_rate: 16000
+    sample_rate: 44100
     batch_size: 8
     num_workers: 8
     shuffle_buffer: 1000
