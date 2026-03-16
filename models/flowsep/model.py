@@ -32,6 +32,23 @@ from models.flowsep.text_encoder import FlanT5HiddenState
 __conditioning_keys__ = {"concat": "c_concat", "crossattn": "c_crossattn", "adm": "y"}
 
 
+class PriorNet(nn.Module):
+    def __init__(self, in_channels=8, base_channels=96):
+        super().__init__()
+        self.conv_in = nn.Conv2d(in_channels, base_channels, 3, padding=1)
+        self.conv_mid1 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_mid2 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_mid3 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_out = nn.Conv2d(base_channels, in_channels, 3, padding=1)
+
+    def forward(self, x):
+        h = F.silu(self.conv_in(x))
+        h = h + F.silu(self.conv_mid1(h))
+        h = h + F.silu(self.conv_mid2(h))
+        h = h + F.silu(self.conv_mid3(h))
+        return self.conv_out(h)
+
+
 def disabled_train(self, mode=True):
     return self
 
@@ -696,6 +713,8 @@ class LatentDiffusion(DDPM):
         asym_noise=False,
         loss_t_weight=0.0,
         reparam_bridge=False,
+        learnable_prior=False,
+        prior_lambda=0.5,
         panns_ckpt_path=None,
         clap_ckpt_path=None,
         lr_warmup_steps=1000,
@@ -728,6 +747,8 @@ class LatentDiffusion(DDPM):
         self.asym_noise = asym_noise
         self.loss_t_weight = loss_t_weight
         self.reparam_bridge = reparam_bridge
+        self.learnable_prior = learnable_prior
+        self.prior_lambda = prior_lambda
         self.panns_ckpt_path = panns_ckpt_path
         self._panns_model = None
         self.clap_ckpt_path = clap_ckpt_path
@@ -772,6 +793,12 @@ class LatentDiffusion(DDPM):
         else:
             self.register_buffer("scale_factor", torch.tensor(scale_factor))
         self.instantiate_first_stage(first_stage_config)
+        if self.learnable_prior:
+            assert self.extra_channels, "learnable_prior requires extra_channels"
+            self.prior_net = PriorNet(in_channels=self.channels)
+            count_params(self.prior_net, verbose=True)
+        else:
+            self.prior_net = None
         self.unconditional_prob_cfg = unconditional_prob_cfg
         self.cond_stage_models = nn.ModuleList([])
         self.cond_stage_model_metadata = {}
@@ -796,6 +823,9 @@ class LatentDiffusion(DDPM):
     def configure_optimizers(self):
         lr = self.learning_rate
         params = list(self.model.parameters())
+
+        if self.learnable_prior:
+            params = params + list(self.prior_net.parameters())
 
         if self.clap_trainable:
             for each in self.cond_stage_models:
@@ -1181,7 +1211,11 @@ class LatentDiffusion(DDPM):
                 else:
                     sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
                 if self.reparam_bridge:
-                    x_noisy = spr_t * x_start + sigma_bb * noise
+                    if self.learnable_prior:
+                        prior_out = self.prior_lambda * self.prior_net(x_extra)
+                        x_noisy = (1 - spr_t) * prior_out + spr_t * x_start + sigma_bb * noise
+                    else:
+                        x_noisy = spr_t * x_start + sigma_bb * noise
                 else:
                     x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + sigma_bb * noise
             else:
@@ -1340,7 +1374,11 @@ class LatentDiffusion(DDPM):
             size = (batch_size, C, L)
 
         if self.reparam_bridge:
-            x = torch.zeros(size, device=self.device)
+            if self.learnable_prior:
+                cached_prior = self.prior_lambda * self.prior_net(x_T)
+                x = cached_prior.clone()
+            else:
+                x = torch.zeros(size, device=self.device)
         elif self.bridge_mode and x_T is not None:
             x = x_T.clone()
         else:
@@ -1366,7 +1404,11 @@ class LatentDiffusion(DDPM):
                 R = (sigma_c / (sigma_p + 1e-8)).view(1, 1, 1, 1)
                 w_s = t_curr.view(1, 1, 1, 1) - R * t_prev.view(1, 1, 1, 1)
                 if self.reparam_bridge:
-                    x = R * x + w_s * model_out
+                    if self.learnable_prior:
+                        w_P = (1 - t_curr).view(1, 1, 1, 1) - R * (1 - t_prev).view(1, 1, 1, 1)
+                        x = R * x + w_s * model_out + w_P * cached_prior
+                    else:
+                        x = R * x + w_s * model_out
                 else:
                     w_y = (1 - t_curr).view(1, 1, 1, 1) - R * (1 - t_prev).view(1, 1, 1, 1)
                     x = R * x + w_s * model_out + w_y * x_T
