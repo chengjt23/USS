@@ -41,11 +41,37 @@ class PriorNet(nn.Module):
         self.conv_mid3 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
         self.conv_out = nn.Conv2d(base_channels, in_channels, 3, padding=1)
 
-    def forward(self, x):
+    def forward(self, x, text_emb=None):
         h = F.silu(self.conv_in(x))
         h = h + F.silu(self.conv_mid1(h))
         h = h + F.silu(self.conv_mid2(h))
         h = h + F.silu(self.conv_mid3(h))
+        return self.conv_out(h)
+
+
+class CondPriorNet(nn.Module):
+    def __init__(self, in_channels=8, base_channels=96, text_dim=1024):
+        super().__init__()
+        self.conv_in = nn.Conv2d(in_channels, base_channels, 3, padding=1)
+        self.conv_mid1 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_mid2 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_mid3 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_out = nn.Conv2d(base_channels, in_channels, 3, padding=1)
+        self.film1 = nn.Linear(text_dim, base_channels * 2)
+        self.film2 = nn.Linear(text_dim, base_channels * 2)
+        self.film3 = nn.Linear(text_dim, base_channels * 2)
+
+    def _film(self, h, film_layer, text_vec):
+        gb = film_layer(text_vec).unsqueeze(-1).unsqueeze(-1)
+        gamma, beta = gb.chunk(2, dim=1)
+        return (1 + gamma) * h + beta
+
+    def forward(self, x, text_emb):
+        text_vec = text_emb.mean(dim=1)
+        h = F.silu(self.conv_in(x))
+        h = h + self._film(F.silu(self.conv_mid1(h)), self.film1, text_vec)
+        h = h + self._film(F.silu(self.conv_mid2(h)), self.film2, text_vec)
+        h = h + self._film(F.silu(self.conv_mid3(h)), self.film3, text_vec)
         return self.conv_out(h)
 
 
@@ -715,6 +741,7 @@ class LatentDiffusion(DDPM):
         reparam_bridge=False,
         learnable_prior=False,
         prior_lambda=0.5,
+        prior_use_text=False,
         panns_ckpt_path=None,
         clap_ckpt_path=None,
         lr_warmup_steps=1000,
@@ -749,6 +776,7 @@ class LatentDiffusion(DDPM):
         self.reparam_bridge = reparam_bridge
         self.learnable_prior = learnable_prior
         self.prior_lambda = prior_lambda
+        self.prior_use_text = prior_use_text
         self.panns_ckpt_path = panns_ckpt_path
         self._panns_model = None
         self.clap_ckpt_path = clap_ckpt_path
@@ -795,7 +823,10 @@ class LatentDiffusion(DDPM):
         self.instantiate_first_stage(first_stage_config)
         if self.learnable_prior:
             assert self.extra_channels, "learnable_prior requires extra_channels"
-            self.prior_net = PriorNet(in_channels=self.channels)
+            if self.prior_use_text:
+                self.prior_net = CondPriorNet(in_channels=self.channels)
+            else:
+                self.prior_net = PriorNet(in_channels=self.channels)
             count_params(self.prior_net, verbose=True)
         else:
             self.prior_net = None
@@ -1212,7 +1243,8 @@ class LatentDiffusion(DDPM):
                     sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
                 if self.reparam_bridge:
                     if self.learnable_prior:
-                        prior_out = self.prior_lambda * self.prior_net(x_extra)
+                        text_emb = cond["crossattn_text"][0] if self.prior_use_text else None
+                        prior_out = self.prior_lambda * self.prior_net(x_extra, text_emb)
                         x_noisy = (1 - spr_t) * prior_out + spr_t * x_start + sigma_bb * noise
                     else:
                         x_noisy = spr_t * x_start + sigma_bb * noise
@@ -1375,7 +1407,8 @@ class LatentDiffusion(DDPM):
 
         if self.reparam_bridge:
             if self.learnable_prior:
-                cached_prior = self.prior_lambda * self.prior_net(x_T)
+                text_emb = cond["crossattn_text"][0] if self.prior_use_text else None
+                cached_prior = self.prior_lambda * self.prior_net(x_T, text_emb)
                 x = cached_prior.clone()
             else:
                 x = torch.zeros(size, device=self.device)
