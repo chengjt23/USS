@@ -133,6 +133,18 @@ class ConcatFiLMPriorNet(nn.Module):
         return self.conv_out(h)
 
 
+class PriorUNetWrapper(nn.Module):
+    def __init__(self, unet_config):
+        super().__init__()
+        self.unet = instantiate_from_config(unet_config)
+
+    def forward(self, x, text_emb):
+        B = x.shape[0]
+        t = torch.zeros(B, device=x.device)
+        context, mask = text_emb
+        return self.unet(x, t, context_list=[context], context_attn_mask_list=[mask])
+
+
 def disabled_train(self, mode=True):
     return self
 
@@ -801,6 +813,7 @@ class LatentDiffusion(DDPM):
         prior_lambda=0.5,
         prior_use_text=False,
         prior_type=None,
+        prior_unet_config=None,
         panns_ckpt_path=None,
         clap_ckpt_path=None,
         lr_warmup_steps=1000,
@@ -837,7 +850,8 @@ class LatentDiffusion(DDPM):
         self.prior_lambda = prior_lambda
         self.prior_use_text = prior_use_text
         self.prior_type = prior_type
-        self.prior_needs_text = prior_type in ("crossattn", "concat_film") or prior_use_text
+        self.prior_unet_config = prior_unet_config
+        self.prior_needs_text = prior_type in ("crossattn", "concat_film", "unet", "unet_explicit") or prior_use_text
         self.panns_ckpt_path = panns_ckpt_path
         self._panns_model = None
         self.clap_ckpt_path = clap_ckpt_path
@@ -884,7 +898,10 @@ class LatentDiffusion(DDPM):
         self.instantiate_first_stage(first_stage_config)
         if self.learnable_prior:
             assert self.extra_channels, "learnable_prior requires extra_channels"
-            if self.prior_type == "crossattn":
+            if self.prior_type in ("unet", "unet_explicit"):
+                assert self.prior_unet_config is not None, "prior_unet_config required for unet prior"
+                self.prior_net = PriorUNetWrapper(self.prior_unet_config)
+            elif self.prior_type == "crossattn":
                 self.prior_net = CrossAttnPriorNet(in_channels=self.channels)
             elif self.prior_type == "concat_film":
                 self.prior_net = ConcatFiLMPriorNet(in_channels=self.channels)
@@ -1308,8 +1325,11 @@ class LatentDiffusion(DDPM):
                     sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
                 if self.reparam_bridge:
                     if self.learnable_prior:
-                        text_emb = cond["crossattn_text"][0] if self.prior_needs_text else None
-                        prior_out = self.prior_lambda * self.prior_net(x_extra, text_emb)
+                        if self.prior_type in ("unet", "unet_explicit"):
+                            prior_out = self.prior_net(x_extra, cond["crossattn_text"])
+                        else:
+                            text_emb = cond["crossattn_text"][0] if self.prior_needs_text else None
+                            prior_out = self.prior_lambda * self.prior_net(x_extra, text_emb)
                         prior_mse = F.mse_loss(prior_out, x_start)
                         x_noisy = (1 - spr_t) * prior_out + spr_t * x_start + sigma_bb * noise
                     else:
@@ -1332,7 +1352,8 @@ class LatentDiffusion(DDPM):
             target = x_start if self.data_prediction else x_start - (1 - self.sigma_min) * noise
 
         if channel != self.channels:
-            x_noisy = torch.cat([x_noisy, x_extra], dim=1)
+            unet_cond = prior_out if (self.learnable_prior and self.prior_type == "unet_explicit") else x_extra
+            x_noisy = torch.cat([x_noisy, unet_cond], dim=1)
 
         model_output = self.apply_model(x_noisy, t, cond)
 
@@ -1476,8 +1497,11 @@ class LatentDiffusion(DDPM):
 
         if self.reparam_bridge:
             if self.learnable_prior:
-                text_emb = cond["crossattn_text"][0] if self.prior_needs_text else None
-                cached_prior = self.prior_lambda * self.prior_net(x_T, text_emb)
+                if self.prior_type in ("unet", "unet_explicit"):
+                    cached_prior = self.prior_net(x_T, cond["crossattn_text"])
+                else:
+                    text_emb = cond["crossattn_text"][0] if self.prior_needs_text else None
+                    cached_prior = self.prior_lambda * self.prior_net(x_T, text_emb)
                 x = cached_prior.clone()
             else:
                 x = torch.zeros(size, device=self.device)
@@ -1490,11 +1514,13 @@ class LatentDiffusion(DDPM):
         t_span = torch.linspace(sampling_eps, 1 - sampling_eps, n_timesteps + 1, device=self.device)
         rho = self.sb_rho
 
+        ei_extra = cached_prior if (self.learnable_prior and self.prior_type == "unet_explicit") else x_T
+
         for step in range(1, len(t_span)):
             t_prev = t_span[step - 1]
             t_curr = t_span[step]
             t_batch = t_prev.view(1).expand(batch_size)
-            model_out = self._model_forward(x, t_batch, cond, x_T)
+            model_out = self._model_forward(x, t_batch, cond, ei_extra)
 
             if self.bridge_mode and self.sb_schedule and self.data_prediction and x_T is not None:
                 if self.asym_noise:
