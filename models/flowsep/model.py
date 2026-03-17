@@ -814,6 +814,7 @@ class LatentDiffusion(DDPM):
         prior_use_text=False,
         prior_type=None,
         prior_unet_config=None,
+        prior_mse_weight=0.0,
         panns_ckpt_path=None,
         clap_ckpt_path=None,
         lr_warmup_steps=1000,
@@ -851,6 +852,7 @@ class LatentDiffusion(DDPM):
         self.prior_use_text = prior_use_text
         self.prior_type = prior_type
         self.prior_unet_config = prior_unet_config
+        self.prior_mse_weight = prior_mse_weight
         self.prior_needs_text = prior_type in ("crossattn", "concat_film", "unet", "unet_explicit") or prior_use_text
         self.panns_ckpt_path = panns_ckpt_path
         self._panns_model = None
@@ -1395,6 +1397,8 @@ class LatentDiffusion(DDPM):
 
         if self.learnable_prior and self.bridge_mode and channel != self.channels:
             loss_dict.update({f"{prefix}/prior_mse": prior_mse.detach()})
+            if self.prior_mse_weight > 0:
+                loss = loss + self.prior_mse_weight * prior_mse
 
         return loss, loss_dict
 
