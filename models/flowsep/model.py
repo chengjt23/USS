@@ -75,6 +75,64 @@ class CondPriorNet(nn.Module):
         return self.conv_out(h)
 
 
+class CrossAttnPriorNet(nn.Module):
+    def __init__(self, in_channels=8, base_channels=96, text_dim=1024):
+        super().__init__()
+        self.conv_in = nn.Conv2d(in_channels, base_channels, 3, padding=1)
+        self.conv_mid1 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_mid2 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.norm = nn.LayerNorm(base_channels)
+        self.to_q = nn.Linear(base_channels, base_channels)
+        self.to_k = nn.Linear(text_dim, base_channels)
+        self.to_v = nn.Linear(text_dim, base_channels)
+        self.to_out = nn.Linear(base_channels, base_channels)
+        self.scale = base_channels ** -0.5
+        self.conv_mid3 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_out = nn.Conv2d(base_channels, in_channels, 3, padding=1)
+
+    def forward(self, x, text_emb):
+        B, _, H, W = x.shape
+        h = F.silu(self.conv_in(x))
+        h = h + F.silu(self.conv_mid1(h))
+        h = h + F.silu(self.conv_mid2(h))
+        h_flat = h.permute(0, 2, 3, 1).reshape(B, H * W, -1)
+        q = self.to_q(self.norm(h_flat))
+        k = self.to_k(text_emb)
+        v = self.to_v(text_emb)
+        attn = F.softmax(torch.bmm(q, k.transpose(1, 2)) * self.scale, dim=-1)
+        h = h + torch.bmm(attn, v).reshape(B, H, W, -1).permute(0, 3, 1, 2)
+        h = h + F.silu(self.conv_mid3(h))
+        return self.conv_out(h)
+
+
+class ConcatFiLMPriorNet(nn.Module):
+    def __init__(self, in_channels=8, base_channels=96, text_dim=1024, text_proj_channels=8):
+        super().__init__()
+        self.text_proj = nn.Linear(text_dim, text_proj_channels)
+        self.conv_in = nn.Conv2d(in_channels + text_proj_channels, base_channels, 3, padding=1)
+        self.conv_mid1 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_mid2 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_mid3 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.conv_out = nn.Conv2d(base_channels, in_channels, 3, padding=1)
+        self.film1 = nn.Linear(text_dim, base_channels * 2)
+        self.film2 = nn.Linear(text_dim, base_channels * 2)
+        self.film3 = nn.Linear(text_dim, base_channels * 2)
+
+    def _film(self, h, film_layer, text_vec):
+        gb = film_layer(text_vec).unsqueeze(-1).unsqueeze(-1)
+        gamma, beta = gb.chunk(2, dim=1)
+        return (1 + gamma) * h + beta
+
+    def forward(self, x, text_emb):
+        text_vec = text_emb.mean(dim=1)
+        t_sp = self.text_proj(text_vec).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, x.shape[2], x.shape[3])
+        h = F.silu(self.conv_in(torch.cat([x, t_sp], dim=1)))
+        h = h + self._film(F.silu(self.conv_mid1(h)), self.film1, text_vec)
+        h = h + self._film(F.silu(self.conv_mid2(h)), self.film2, text_vec)
+        h = h + self._film(F.silu(self.conv_mid3(h)), self.film3, text_vec)
+        return self.conv_out(h)
+
+
 def disabled_train(self, mode=True):
     return self
 
@@ -742,6 +800,7 @@ class LatentDiffusion(DDPM):
         learnable_prior=False,
         prior_lambda=0.5,
         prior_use_text=False,
+        prior_type=None,
         panns_ckpt_path=None,
         clap_ckpt_path=None,
         lr_warmup_steps=1000,
@@ -777,6 +836,8 @@ class LatentDiffusion(DDPM):
         self.learnable_prior = learnable_prior
         self.prior_lambda = prior_lambda
         self.prior_use_text = prior_use_text
+        self.prior_type = prior_type
+        self.prior_needs_text = prior_type in ("crossattn", "concat_film") or prior_use_text
         self.panns_ckpt_path = panns_ckpt_path
         self._panns_model = None
         self.clap_ckpt_path = clap_ckpt_path
@@ -823,7 +884,11 @@ class LatentDiffusion(DDPM):
         self.instantiate_first_stage(first_stage_config)
         if self.learnable_prior:
             assert self.extra_channels, "learnable_prior requires extra_channels"
-            if self.prior_use_text:
+            if self.prior_type == "crossattn":
+                self.prior_net = CrossAttnPriorNet(in_channels=self.channels)
+            elif self.prior_type == "concat_film":
+                self.prior_net = ConcatFiLMPriorNet(in_channels=self.channels)
+            elif self.prior_use_text:
                 self.prior_net = CondPriorNet(in_channels=self.channels)
             else:
                 self.prior_net = PriorNet(in_channels=self.channels)
@@ -1243,7 +1308,7 @@ class LatentDiffusion(DDPM):
                     sigma_bb = self.sb_rho * torch.sqrt(spr_t * (1 - spr_t) + 1e-8)
                 if self.reparam_bridge:
                     if self.learnable_prior:
-                        text_emb = cond["crossattn_text"][0] if self.prior_use_text else None
+                        text_emb = cond["crossattn_text"][0] if self.prior_needs_text else None
                         prior_out = self.prior_lambda * self.prior_net(x_extra, text_emb)
                         prior_mse = F.mse_loss(prior_out, x_start)
                         x_noisy = (1 - spr_t) * prior_out + spr_t * x_start + sigma_bb * noise
@@ -1411,7 +1476,7 @@ class LatentDiffusion(DDPM):
 
         if self.reparam_bridge:
             if self.learnable_prior:
-                text_emb = cond["crossattn_text"][0] if self.prior_use_text else None
+                text_emb = cond["crossattn_text"][0] if self.prior_needs_text else None
                 cached_prior = self.prior_lambda * self.prior_net(x_T, text_emb)
                 x = cached_prior.clone()
             else:
