@@ -17,6 +17,7 @@ datamodule:
     drop_last: false
     persistent_workers: true
     mix_selected: [2mix]
+    val_tar_count: 10
 
 step:
   validation_every_n_epochs: 1
