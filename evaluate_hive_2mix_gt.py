@@ -12,6 +12,7 @@ Usage:
 """
 import sys
 import os
+ os.environ["CUDA_VISIBLE_DEVICES"] = "8"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import argparse
@@ -23,6 +24,7 @@ import torchaudio
 import numpy as np
 from scipy import linalg
 from pytorch_lightning import seed_everything
+from tqdm import tqdm
 
 from utils.tools import instantiate_from_config
 from utils.audio import TacotronSTFT, get_mel_from_wav
@@ -162,6 +164,7 @@ def main():
     count = 0
 
     print(f"Starting evaluation (max {args.max_samples} samples) ...")
+    pbar = tqdm(total=args.max_samples, desc="Evaluating", unit="sample", dynamic_ncols=True)
     with torch.no_grad():
         for batch in val_loader:
             if count >= args.max_samples:
@@ -226,7 +229,9 @@ def main():
                 clap_text_embs.append(_clap_text_embedding(clap_model, list(captions[:actual]), device))
 
             count += actual
-            print(f"  [{count}/{args.max_samples}] processed")
+            pbar.update(actual)
+            pbar.set_postfix({"processed": count})
+    pbar.close()
 
     # ---- compute FAD ----
     ref_all = torch.cat(fad_ref_embs, dim=0).float().numpy()
