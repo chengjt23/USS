@@ -12,7 +12,7 @@ Usage:
 """
 import sys
 import os
- os.environ["CUDA_VISIBLE_DEVICES"] = "8"
+os.environ["CUDA_VISIBLE_DEVICES"] = "8"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import argparse
