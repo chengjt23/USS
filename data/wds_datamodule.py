@@ -139,6 +139,7 @@ def create_wds_dataloader(
     is_val: bool = False,
     mix_selected: list = None,
     data_ratio: float = 1.0,
+    val_tar_count: int = 2,
 ):
     if mix_selected is not None:
         selected_dirs = [os.path.join(root_dir, m) for m in mix_selected]
@@ -156,7 +157,7 @@ def create_wds_dataloader(
                 tar_files = sorted(glob.glob(os.path.join(subdir_path, "*.tar")))
                 if len(tar_files) == 0:
                     continue
-                selected_tars = rng.sample(tar_files, min(2, len(tar_files)))
+                selected_tars = rng.sample(tar_files, min(val_tar_count, len(tar_files)))
                 tar_paths.extend(selected_tars)
     else:
         tar_paths = []
@@ -219,11 +220,13 @@ class WDSDataModule(pl.LightningDataModule):
         persistent_workers: bool = True,
         mix_selected: list = None,
         data_ratio: float = 1.0,
+        val_tar_count: int = 2,
     ):
         super().__init__()
         self.train_dir = train_dir
         self.mix_selected = mix_selected
         self.data_ratio = data_ratio
+        self.val_tar_count = val_tar_count
         self.val_dir = val_dir
         self.test_dir = test_dir
         self.sample_rate = sample_rate
@@ -259,6 +262,7 @@ class WDSDataModule(pl.LightningDataModule):
             persistent_workers=self.persistent_workers,
             is_val=True,
             mix_selected=self.mix_selected,
+            val_tar_count=self.val_tar_count,
         )
 
     def test_dataloader(self):

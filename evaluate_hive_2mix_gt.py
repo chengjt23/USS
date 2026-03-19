@@ -7,8 +7,7 @@ Usage:
     python evaluate_hive_2mix_gt.py \
         -c configs/bridgesep/hive_2mix/bridge_sb_ei_2mix.yaml \
         --panns_ckpt_path  metrics/fad/Cnn14_16k_mAP=0.438.pth \
-        --clap_ckpt_path   metrics/clapscore/music_speech_audioset_epoch_15_esc_89.98.pt \
-        -n 200
+        --clap_ckpt_path   metrics/clapscore/music_speech_audioset_epoch_15_esc_89.98.pt
 """
 import sys
 import os
@@ -119,8 +118,8 @@ def main():
         description="Evaluate upper-bound metrics of the VAE+BigVGAN compression pipeline on GT audio.")
     parser.add_argument("-c", "--config_yaml", type=str, required=True,
                         help="Path to the model config yaml")
-    parser.add_argument("-n", "--max_samples", type=int, default=200,
-                        help="Max number of samples to evaluate")
+    parser.add_argument("--val_tar_count", type=int, default=50,
+                        help="Number of tar files to sample for evaluation")
     parser.add_argument("--panns_ckpt_path", type=str,
                         default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                              "metrics", "fad", "Cnn14_16k_mAP=0.438.pth"))
@@ -147,7 +146,9 @@ def main():
     duration = configs["preprocessing"]["audio"]["duration"]
     target_length = int(duration * sampling_rate / hopsize)
 
-    datamodule = WDSDataModule(**configs["datamodule"]["data_config"])
+    data_config = configs["datamodule"]["data_config"].copy()
+    data_config["val_tar_count"] = args.val_tar_count
+    datamodule = WDSDataModule(**data_config)
     _, val_loader, _ = datamodule.make_loader
     val_loader = WrappedDataLoader(val_loader, configs, stft_tool)
 
@@ -161,15 +162,12 @@ def main():
     fad_ref_embs, fad_pred_embs = [], []
     clap_ref_audio_embs, clap_pred_audio_embs = [], []
     clap_text_embs = []
-    count = 0
+    sample_count = 0
 
-    print(f"Starting evaluation (max {args.max_samples} samples) ...")
-    pbar = tqdm(total=args.max_samples, desc="Evaluating", unit="sample", dynamic_ncols=True)
+    print(f"Starting evaluation (val_tar_count={args.val_tar_count}) ...")
+    pbar = tqdm(desc="Evaluating", unit="batch", dynamic_ncols=True)
     with torch.no_grad():
         for batch in val_loader:
-            if count >= args.max_samples:
-                break
-
             # move tensors to device
             for k, v in batch.items():
                 if isinstance(v, torch.Tensor):
@@ -203,13 +201,12 @@ def main():
                 ref_wav = ref_wav.squeeze(1)                       # (B, samples)
 
             bs = fbank.shape[0]
-            actual = min(bs, args.max_samples - count)
 
             # --- metric embeddings ---
-            pred_tensor = torch.from_numpy(pred_wav[:actual]).float()
+            pred_tensor = torch.from_numpy(pred_wav).float()
             if pred_tensor.ndim == 3:
                 pred_tensor = pred_tensor.squeeze(1)
-            ref_tensor = ref_wav[:actual]
+            ref_tensor = ref_wav
 
             min_len = min(pred_tensor.shape[-1], ref_tensor.shape[-1])
             pred_tensor = pred_tensor[..., :min_len]
@@ -226,11 +223,11 @@ def main():
             # CLAP text embeddings
             captions = batch.get("caption", batch.get("text", []))
             if captions and any(c != "" for c in captions):
-                clap_text_embs.append(_clap_text_embedding(clap_model, list(captions[:actual]), device))
+                clap_text_embs.append(_clap_text_embedding(clap_model, list(captions), device))
 
-            count += actual
-            pbar.update(actual)
-            pbar.set_postfix({"processed": count})
+            sample_count += bs
+            pbar.update(1)
+            pbar.set_postfix({"samples": sample_count})
     pbar.close()
 
     # ---- compute FAD ----
@@ -257,7 +254,7 @@ def main():
     print("  GT -> STFT/mel -> VAE enc -> VAE dec -> BigVGAN")
     print("  (Upper-bound metrics of the compression pipeline)")
     print("=" * 50)
-    print(f"  Samples evaluated : {count}")
+    print(f"  Samples evaluated : {ref_all.shape[0]}")
     print(f"  FAD               : {fad:.4f}")
     print(f"  CLAPScore         : {clapscore:.4f}")
     print(f"  CLAPScore_A       : {clapscore_a:.4f}")
