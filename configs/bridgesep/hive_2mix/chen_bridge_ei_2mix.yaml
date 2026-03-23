@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "bridge_sb_ei-2mix"
+exp_name: "chen_bridge_ei-2mix"
 project: "USS"
 precision: "medium"
 
@@ -11,7 +11,7 @@ datamodule:
     val_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/val
     test_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/test
     sample_rate: 44100
-    batch_size: 16
+    batch_size: 8
     num_workers: 8
     shuffle_buffer: 1000
     drop_last: false
@@ -70,6 +70,7 @@ model:
     bridge_mode: true
     sb_schedule: true
     sb_rho: 1.0
+    chen_bridge: true
     data_prediction: true
     use_ei_solver: true
     unet_config:
