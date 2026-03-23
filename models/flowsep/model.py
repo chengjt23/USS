@@ -296,7 +296,7 @@ class DDPM(pl.LightningModule):
         assert (
             alphas_cumprod.shape[0] == self.num_timesteps
         ), "alphas have to be defined for each timestep"
-
+    
         to_torch = partial(torch.tensor, dtype=torch.float32)
 
         self.register_buffer("betas", to_torch(betas))
@@ -803,6 +803,12 @@ class LatentDiffusion(DDPM):
         bridge_mode=False,
         sb_schedule=False,
         sb_rho=1.0,
+        chen_bridge=False,
+        fg_schedule="vp_linear",
+        fg_beta0=0.1,
+        fg_beta1=20.0,
+        bridge_input_start_noise=False,
+        bridge_input_start_noise_std=0.0,
         data_prediction=False,
         use_ei_solver=False,
         logit_normal_t=0.0,
@@ -841,6 +847,12 @@ class LatentDiffusion(DDPM):
         self.bridge_mode = bridge_mode
         self.sb_schedule = sb_schedule
         self.sb_rho = sb_rho
+        self.chen_bridge = chen_bridge
+        self.fg_schedule = fg_schedule
+        self.fg_beta0 = fg_beta0
+        self.fg_beta1 = fg_beta1
+        self.bridge_input_start_noise = bridge_input_start_noise
+        self.bridge_input_start_noise_std = bridge_input_start_noise_std
         self.data_prediction = data_prediction
         self.use_ei_solver = use_ei_solver
         self.logit_normal_t = logit_normal_t
@@ -1309,6 +1321,47 @@ class LatentDiffusion(DDPM):
         else:
             return x_recon
 
+    def _expand_to_input_dim(self, v, x):
+        while v.ndim < x.ndim:
+            v = v.unsqueeze(-1)
+        return v
+
+    def _chen_bridge_xt(self, x0, x1, t, eps):
+        if self.fg_schedule != "vp_linear":
+            raise NotImplementedError(f"Unsupported fg_schedule: {self.fg_schedule}")
+
+        beta0 = t.new_tensor(self.fg_beta0)
+        beta1 = t.new_tensor(self.fg_beta1)
+        beta_delta = beta1 - beta0
+
+        integral_t = beta0 * t + 0.5 * beta_delta * t * t
+        integral_1 = beta0 + 0.5 * beta_delta
+
+        alpha_t = torch.exp(-0.5 * integral_t)
+        alpha_bar_t = torch.exp(0.5 * (integral_1 - integral_t))
+
+        sigma_t2 = torch.exp(integral_t) - 1.0
+        sigma_bar_t2 = torch.exp(integral_1) - torch.exp(integral_t)
+        sigma_12 = torch.exp(integral_1) - 1.0
+
+        sigma_t = torch.sqrt(torch.clamp(sigma_t2, min=1e-12))
+        sigma_bar_t = torch.sqrt(torch.clamp(sigma_bar_t2, min=1e-12))
+        sigma_1 = torch.sqrt(torch.clamp(sigma_12, min=1e-12))
+
+        w_x0 = self._expand_to_input_dim(alpha_t * sigma_bar_t2 / (sigma_12 + 1e-12), x0)
+        w_x1 = self._expand_to_input_dim(alpha_bar_t * sigma_t2 / (sigma_12 + 1e-12), x0)
+        w_eps = self._expand_to_input_dim(alpha_t * sigma_bar_t * sigma_t / (sigma_1 + 1e-12), x0)
+
+        return w_x0 * x0 + w_x1 * x1 + w_eps * eps
+
+    def _add_bridge_start_noise(self, x, spr_t):
+        if not self.bridge_input_start_noise:
+            return x
+        if self.bridge_input_start_noise_std <= 0:
+            return x
+        weight = torch.clamp(1.0 - spr_t, min=0.0)
+        return x + self.bridge_input_start_noise_std * weight * torch.randn_like(x)
+
     def p_losses(self, x_start, cond, t, noise=None):
         channel = x_start.shape[1]
 
@@ -1319,7 +1372,20 @@ class LatentDiffusion(DDPM):
 
         spr_t = t.view(-1, 1, 1, 1)
 
-        if self.bridge_mode and channel != self.channels:
+        chen_bridge_active = self.chen_bridge and channel != self.channels
+
+        if chen_bridge_active:
+            if self.learnable_prior and self.prior_type in ("unet", "unet_explicit"):
+                prior_out = self.prior_net(x_extra, cond["crossattn_text"])
+            elif self.learnable_prior:
+                text_emb = cond["crossattn_text"][0] if self.prior_needs_text else None
+                prior_out = self.prior_lambda * self.prior_net(x_extra, text_emb)
+            x_noisy = self._chen_bridge_xt(x_start, x_extra, t, noise)
+            if self.bridge_mode:
+                x_noisy = self._add_bridge_start_noise(x_noisy, spr_t)
+            target = x_start
+
+        elif self.bridge_mode and channel != self.channels:
             if self.sb_schedule:
                 if self.asym_noise:
                     sigma_bb = self.sb_rho * torch.sqrt(spr_t + 1e-8) * (1 - spr_t)
@@ -1340,6 +1406,7 @@ class LatentDiffusion(DDPM):
                     x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + sigma_bb * noise
             else:
                 x_noisy = (1 - spr_t) * x_extra + spr_t * x_start + self.sigma_min * noise
+            x_noisy = self._add_bridge_start_noise(x_noisy, spr_t)
             target = x_start if self.data_prediction else x_start - x_extra
         elif self.sb_schedule:
             if self.asym_noise:
