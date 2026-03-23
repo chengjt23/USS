@@ -11,7 +11,7 @@ datamodule:
     val_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/val
     test_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/test
     sample_rate: 44100
-    batch_size: 16
+    batch_size: 32
     num_workers: 8
     shuffle_buffer: 1000
     drop_last: false
