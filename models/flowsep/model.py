@@ -805,8 +805,10 @@ class LatentDiffusion(DDPM):
         sb_rho=1.0,
         chen_bridge=False,
         fg_schedule="vp_linear",
-        fg_beta0=0.1,
+        fg_beta0=0.01,
         fg_beta1=20.0,
+        chen_sampler_type="sde",
+        chen_sampling_eps=1e-3,
         bridge_input_start_noise=False,
         bridge_input_start_noise_std=0.0,
         data_prediction=False,
@@ -851,6 +853,8 @@ class LatentDiffusion(DDPM):
         self.fg_schedule = fg_schedule
         self.fg_beta0 = fg_beta0
         self.fg_beta1 = fg_beta1
+        self.chen_sampler_type = chen_sampler_type
+        self.chen_sampling_eps = chen_sampling_eps
         self.bridge_input_start_noise = bridge_input_start_noise
         self.bridge_input_start_noise_std = bridge_input_start_noise_std
         self.data_prediction = data_prediction
@@ -1327,6 +1331,23 @@ class LatentDiffusion(DDPM):
         return v
 
     def _chen_bridge_xt(self, x0, x1, t, eps):
+        terms_t = self._chen_vp_terms(t)
+        alpha_t = terms_t["alpha_t"]
+        alpha_bar_t = terms_t["alpha_bar_t"]
+        sigma_t2 = terms_t["sigma_t2"]
+        sigma_bar_t2 = terms_t["sigma_bar_t2"]
+        sigma_12 = terms_t["sigma_12"]
+        sigma_t = terms_t["sigma_t"]
+        sigma_bar_t = terms_t["sigma_bar_t"]
+        sigma_1 = terms_t["sigma_1"]
+
+        w_x0 = self._expand_to_input_dim(alpha_t * sigma_bar_t2 / (sigma_12 + 1e-12), x0)
+        w_x1 = self._expand_to_input_dim(alpha_bar_t * sigma_t2 / (sigma_12 + 1e-12), x0)
+        w_eps = self._expand_to_input_dim(alpha_t * sigma_bar_t * sigma_t / (sigma_1 + 1e-12), x0)
+
+        return w_x0 * x0 + w_x1 * x1 + w_eps * eps
+
+    def _chen_vp_terms(self, t):
         if self.fg_schedule != "vp_linear":
             raise NotImplementedError(f"Unsupported fg_schedule: {self.fg_schedule}")
 
@@ -1348,11 +1369,23 @@ class LatentDiffusion(DDPM):
         sigma_bar_t = torch.sqrt(torch.clamp(sigma_bar_t2, min=1e-12))
         sigma_1 = torch.sqrt(torch.clamp(sigma_12, min=1e-12))
 
-        w_x0 = self._expand_to_input_dim(alpha_t * sigma_bar_t2 / (sigma_12 + 1e-12), x0)
-        w_x1 = self._expand_to_input_dim(alpha_bar_t * sigma_t2 / (sigma_12 + 1e-12), x0)
-        w_eps = self._expand_to_input_dim(alpha_t * sigma_bar_t * sigma_t / (sigma_1 + 1e-12), x0)
+        return {
+            "alpha_t": alpha_t,
+            "alpha_bar_t": alpha_bar_t,
+            "sigma_t2": sigma_t2,
+            "sigma_bar_t2": sigma_bar_t2,
+            "sigma_12": sigma_12,
+            "sigma_t": sigma_t,
+            "sigma_bar_t": sigma_bar_t,
+            "sigma_1": sigma_1,
+        }
 
-        return w_x0 * x0 + w_x1 * x1 + w_eps * eps
+    def _chen_predict_x0(self, model_out, x1):
+        if self.data_prediction:
+            return model_out
+        if x1 is not None:
+            return model_out + x1
+        return model_out
 
     def _add_bridge_start_noise(self, x, spr_t):
         if not self.bridge_input_start_noise:
@@ -1531,6 +1564,112 @@ class LatentDiffusion(DDPM):
         denom = 1 - (1 - self.sigma_min) * spr_t + 1e-8
         return (model_out - (1 - self.sigma_min) * x) / denom
 
+    def solve_chen_sde(self, n_timesteps, batch_size, shape, cond=None, unconditional_guidance_scale=1.0, unconditional_conditioning=None, x_T=None, temperature=1.0, spks=None):
+        if len(shape) == 3:
+            C, H, W = shape
+            size = (batch_size, C, H, W)
+        else:
+            C, L = shape
+            size = (batch_size, C, L)
+
+        x1 = x_T
+        if x1 is not None:
+            x = x1.clone()
+        else:
+            x = torch.randn(size, device=self.device) * temperature
+
+        sampling_eps = self.chen_sampling_eps
+        t_span = torch.linspace(1.0 - sampling_eps, sampling_eps, n_timesteps + 1, device=self.device)
+
+        for step in range(1, len(t_span)):
+            s = t_span[step - 1]
+            t = t_span[step]
+            s_batch = s.view(1).expand(batch_size)
+            t_batch = t.view(1).expand(batch_size)
+
+            model_out = self._model_forward(x, s_batch, cond, x1)
+            x0_pred = self._chen_predict_x0(model_out, x1)
+
+            terms_s = self._chen_vp_terms(s_batch)
+            terms_t = self._chen_vp_terms(t_batch)
+
+            ratio_sigma = terms_t["sigma_t2"] / (terms_s["sigma_t2"] + 1e-12)
+            coef_x = self._expand_to_input_dim(
+                terms_t["alpha_t"] * terms_t["sigma_t2"] / (terms_s["alpha_t"] * terms_s["sigma_t2"] + 1e-12), x
+            )
+            coef_theta = self._expand_to_input_dim(terms_t["alpha_t"] * (1.0 - ratio_sigma), x)
+            coef_noise = self._expand_to_input_dim(
+                terms_t["alpha_t"] * terms_t["sigma_t"] * torch.sqrt(torch.clamp(1.0 - ratio_sigma, min=0.0)), x
+            )
+
+            eps_step = torch.randn_like(x) * temperature
+            x = coef_x * x + coef_theta * x0_pred + coef_noise * eps_step
+
+        return x
+
+    def solve_chen_ode(self, n_timesteps, batch_size, shape, cond=None, unconditional_guidance_scale=1.0, unconditional_conditioning=None, x_T=None, temperature=1.0, spks=None):
+        if len(shape) == 3:
+            C, H, W = shape
+            size = (batch_size, C, H, W)
+        else:
+            C, L = shape
+            size = (batch_size, C, L)
+
+        x1 = x_T
+        if x1 is not None:
+            x = x1.clone()
+        else:
+            x = torch.randn(size, device=self.device) * temperature
+
+        sampling_eps = self.chen_sampling_eps
+        t_span = torch.linspace(1.0 - sampling_eps, sampling_eps, n_timesteps + 1, device=self.device)
+
+        for step in range(1, len(t_span)):
+            s = t_span[step - 1]
+            t = t_span[step]
+            s_batch = s.view(1).expand(batch_size)
+            t_batch = t.view(1).expand(batch_size)
+
+            model_out = self._model_forward(x, s_batch, cond, x1)
+            x0_pred = self._chen_predict_x0(model_out, x1)
+
+            terms_s = self._chen_vp_terms(s_batch)
+            terms_t = self._chen_vp_terms(t_batch)
+
+            coef_x = self._expand_to_input_dim(
+                terms_t["alpha_t"] * terms_t["sigma_t"] * terms_t["sigma_bar_t"]
+                / (terms_s["alpha_t"] * terms_s["sigma_t"] * terms_s["sigma_bar_t"] + 1e-12),
+                x,
+            )
+            coef_theta = self._expand_to_input_dim(
+                terms_t["alpha_t"]
+                * (
+                    terms_t["sigma_bar_t2"]
+                    - (terms_s["sigma_bar_t"] * terms_t["sigma_t"] * terms_t["sigma_bar_t"] / (terms_s["sigma_t"] + 1e-12))
+                )
+                / (terms_t["sigma_12"] + 1e-12),
+                x,
+            )
+
+            if x1 is None:
+                coef_x1 = 0.0
+                x1_term = 0.0
+            else:
+                coef_x1 = self._expand_to_input_dim(
+                    terms_t["alpha_bar_t"]
+                    * (
+                        terms_t["sigma_t2"]
+                        - (terms_s["sigma_t"] * terms_t["sigma_t"] * terms_t["sigma_bar_t"] / (terms_s["sigma_bar_t"] + 1e-12))
+                    )
+                    / (terms_t["sigma_12"] + 1e-12),
+                    x,
+                )
+                x1_term = coef_x1 * x1
+
+            x = coef_x * x + coef_theta * x0_pred + x1_term
+
+        return x
+
     def solve_euler(self, n_timesteps, batch_size, shape, cond=None, unconditional_guidance_scale=1.0, unconditional_conditioning=None, x_T=None, temperature=1.0, spks=None):
         if len(shape) == 3:
             C, H, W = shape
@@ -1638,7 +1777,15 @@ class LatentDiffusion(DDPM):
             shape = (self.channels, self.latent_t_size, self.latent_f_size)
 
         intermediate = None
-        solver_fn = self.solve_ei if self.use_ei_solver else self.solve_euler
+        if self.chen_bridge:
+            if self.chen_sampler_type == "sde":
+                solver_fn = self.solve_chen_sde
+            elif self.chen_sampler_type == "ode":
+                solver_fn = self.solve_chen_ode
+            else:
+                raise NotImplementedError(f"Unsupported chen_sampler_type: {self.chen_sampler_type}")
+        else:
+            solver_fn = self.solve_ei if self.use_ei_solver else self.solve_euler
         samples = solver_fn(
             ddim_steps,
             batch_size,
