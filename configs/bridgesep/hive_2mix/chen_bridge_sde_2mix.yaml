@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "chen_bridge_ei-2mix"
+exp_name: "chen_bridge_sde-2mix"
 project: "USS"
 precision: "medium"
 
