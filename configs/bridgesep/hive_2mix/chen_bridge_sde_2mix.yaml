@@ -71,6 +71,7 @@ model:
     sb_schedule: true
     sb_rho: 1.0
     chen_bridge: true
+    chen_sampler_type: "sde"
     data_prediction: true
     use_ei_solver: true
     unet_config:
