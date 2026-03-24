@@ -45,7 +45,7 @@ augmentation:
 model:
   target: models.flowsep.model.LatentDiffusion
   params:
-    base_learning_rate: 5.0e-05
+    base_learning_rate: 1.0e-04
     sampling_rate: 16000
     batchsize: 4
     linear_start: 0.0015
