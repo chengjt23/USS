@@ -194,6 +194,7 @@ def main(configs, ckpt_path, guidance_scales, ddim_steps_list, limit_val_batches
             limit_val_batches=limit_val_batches,
             precision="bf16-mixed",
             enable_progress_bar=True,
+            inference_mode=False,
         )
 
         if first_run:

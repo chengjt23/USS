@@ -173,6 +173,7 @@ def main(configs, ckpt_path):
         devices=1,
         limit_val_batches=limit_val_batches,
         precision="bf16-mixed",
+        inference_mode=False,
     )
 
     results = trainer.validate(model, val_loader, ckpt_path=ckpt_path)
