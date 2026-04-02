@@ -1348,22 +1348,29 @@ class LatentDiffusion(DDPM):
         return w_x0 * x0 + w_x1 * x1 + w_eps * eps
 
     def _chen_vp_terms(self, t):
-        if self.fg_schedule != "vp_linear":
-            raise NotImplementedError(f"Unsupported fg_schedule: {self.fg_schedule}")
-
         beta0 = t.new_tensor(self.fg_beta0)
         beta1 = t.new_tensor(self.fg_beta1)
         beta_delta = beta1 - beta0
 
-        integral_t = beta0 * t + 0.5 * beta_delta * t * t
-        integral_1 = beta0 + 0.5 * beta_delta
+        if self.fg_schedule == "vp_linear":
+            integral_t = beta0 * t + 0.5 * beta_delta * t * t
+            integral_1 = beta0 + 0.5 * beta_delta
 
-        alpha_t = torch.exp(-0.5 * integral_t)
-        alpha_bar_t = torch.exp(0.5 * (integral_1 - integral_t))
+            alpha_t = torch.exp(-0.5 * integral_t)
+            alpha_bar_t = torch.exp(0.5 * (integral_1 - integral_t))
 
-        sigma_t2 = torch.exp(integral_t) - 1.0
-        sigma_bar_t2 = torch.exp(integral_1) - torch.exp(integral_t)
-        sigma_12 = torch.exp(integral_1) - 1.0
+            sigma_t2 = torch.exp(integral_t) - 1.0
+            sigma_bar_t2 = torch.exp(integral_1) - torch.exp(integral_t)
+            sigma_12 = torch.exp(integral_1) - 1.0
+        elif self.fg_schedule == "gmax_linear":
+            sigma_t2 = beta0 * t + 0.5 * beta_delta * t * t
+            sigma_12 = beta0 + 0.5 * beta_delta
+            sigma_bar_t2 = sigma_12 - sigma_t2
+
+            alpha_t = torch.ones_like(t)
+            alpha_bar_t = torch.ones_like(t)
+        else:
+            raise NotImplementedError(f"Unsupported fg_schedule: {self.fg_schedule}")
 
         sigma_t = torch.sqrt(torch.clamp(sigma_t2, min=1e-12))
         sigma_bar_t = torch.sqrt(torch.clamp(sigma_bar_t2, min=1e-12))

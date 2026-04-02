@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py -c ./configs/bridgesep/hive_2mix/chen_bridge_ode_2mix_double_beta1.yaml
