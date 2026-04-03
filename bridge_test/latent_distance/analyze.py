@@ -8,6 +8,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
+from tqdm import tqdm
 
 from data.wds_datamodule import create_wds_dataloader
 from utils.audio import TacotronSTFT, get_mel_from_wav
@@ -93,7 +94,7 @@ def main():
     dist_noise_clean = []
     all_z_clean, all_z_mix, all_z_noise = [], [], []
 
-    for batch_idx, batch in enumerate(loader):
+    for batch_idx, batch in enumerate(tqdm(loader, total=MAX_BATCHES, desc="Encoding")):
         if batch_idx >= MAX_BATCHES:
             break
 
@@ -130,8 +131,6 @@ def main():
         all_z_clean.append(zc_flat)
         all_z_mix.append(zm_flat)
         all_z_noise.append(zn_flat)
-
-        print(f"batch {batch_idx+1}/{MAX_BATCHES}  n={len(dist_mix_clean)}", end="\r")
 
     print()
     dist_mix_clean = np.array(dist_mix_clean)
