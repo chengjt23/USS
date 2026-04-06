@@ -64,6 +64,7 @@ def convert_wds_batch_to_model_format(batch, config, stft_tool):
     sources_audio = batch["sources"]
     labels = batch["labels"]
     batch_size = mix_audio.shape[0]
+    sample_metadata = batch.get("metadata", [{} for _ in range(batch_size)])
 
     if sources_audio.ndim == 4 and sources_audio.shape[1] > 0:
         target_audio = sources_audio[:, 0, :, :]
@@ -110,6 +111,7 @@ def convert_wds_batch_to_model_format(batch, config, stft_tool):
         "mixed_waveform": mix_audio_mono,
         "mixed_mel": mixed_mel,
         "caption": text_list,
+        "sample_metadata": sample_metadata,
     }
 
 

@@ -64,6 +64,7 @@ def decode_sample_to_tensors(sample: dict, target_sr: int):
     json_b = sample.get("json") or sample.get("__json__") or sample.get("txt") or sample.get("meta")
     if json_b is None:
         labels = []
+        meta = {}
     else:
         if isinstance(json_b, (bytes, bytearray)):
             json_str = json_b.decode("utf-8")
@@ -75,7 +76,7 @@ def decode_sample_to_tensors(sample: dict, target_sr: int):
             meta = {}
         labels = meta.get("labels", meta.get("label", []))
 
-    return mix_tensor, sources_tensor, labels
+    return mix_tensor, sources_tensor, labels, meta
 
 
 def create_vggsound_dataloader(

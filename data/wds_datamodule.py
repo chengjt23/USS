@@ -85,6 +85,7 @@ def wds_collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, List]]):
     mixes = [item[0] for item in batch]
     sources = [item[1] for item in batch]
     labels = [item[2] for item in batch]
+    metadata = [item[3] if len(item) > 3 else {} for item in batch]
 
     max_T = max(m.shape[-1] for m in mixes)
     n_src_list = [s.shape[0] if s.ndim == 3 else 0 for s in sources]
@@ -125,7 +126,7 @@ def wds_collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, List]]):
     else:
         sources_batch = torch.stack(padded_sources, dim=0)
 
-    return {"mix": mix_batch, "sources": sources_batch, "labels": labels}
+    return {"mix": mix_batch, "sources": sources_batch, "labels": labels, "metadata": metadata}
 
 
 def create_wds_dataloader(

@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import torch
@@ -1275,6 +1276,18 @@ class LatentDiffusion(DDPM):
             self.metrics_buffer = {}
         
         loss, loss_dict = self.shared_step(batch)
+
+        loss_value = float(loss.detach().cpu())
+        if loss_value > 100.0:
+            sample_metadata = batch.get("sample_metadata")
+            try:
+                sample_metadata_str = json.dumps(sample_metadata, ensure_ascii=False)
+            except Exception:
+                sample_metadata_str = str(sample_metadata)
+            print(
+                f"[high-loss-batch] rank={self.global_rank}, global_step={self.global_step}, batch_idx={batch_idx}, loss={loss_value}, sample_metadata={sample_metadata_str}",
+                flush=True,
+            )
 
         self.log_dict(
             {k: float(v) for k, v in loss_dict.items()},
