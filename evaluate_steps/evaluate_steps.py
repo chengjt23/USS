@@ -13,7 +13,7 @@ from pytorch_lightning import seed_everything
 
 from utils.tools import instantiate_from_config
 from utils.audio import TacotronSTFT, get_mel_from_wav
-from data.wds_datamodule import WDSDataModule
+from data import build_datamodule
 from train import WrappedDataLoader, build_stft_tool
 
 
@@ -30,7 +30,7 @@ def load_model(config_path, ckpt_path):
 
 def build_val_loader(configs):
     stft_tool = build_stft_tool(configs)
-    datamodule = WDSDataModule(**configs["datamodule"]["data_config"])
+    datamodule = build_datamodule(configs)
     _, val_loader, _ = datamodule.make_loader
     return WrappedDataLoader(val_loader, configs, stft_tool), stft_tool
 

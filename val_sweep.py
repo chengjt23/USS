@@ -10,7 +10,7 @@ import logging
 from itertools import product
 from pytorch_lightning import Trainer, seed_everything
 
-from data.wds_datamodule import WDSDataModule
+from data import build_datamodule
 from utils.audio import TacotronSTFT, get_mel_from_wav
 from utils.tools import instantiate_from_config
 
@@ -165,7 +165,7 @@ def main(configs, ckpt_path, guidance_scales, ddim_steps_list, limit_val_batches
     exp_group_name = configs["exp_group"]
     exp_name = configs["exp_name"]
 
-    datamodule = WDSDataModule(**configs["datamodule"]["data_config"])
+    datamodule = build_datamodule(configs)
     _, val_loader, _ = datamodule.make_loader
 
     stft_tool = build_stft_tool(configs)

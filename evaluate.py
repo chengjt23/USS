@@ -11,7 +11,7 @@ from pytorch_lightning import seed_everything
 
 from utils.tools import instantiate_from_config
 from utils.audio import TacotronSTFT, get_mel_from_wav
-from data.wds_datamodule import WDSDataModule
+from data import build_datamodule
 from train import WrappedDataLoader, build_stft_tool
 
 
@@ -67,7 +67,7 @@ def main():
     duration = configs["preprocessing"]["audio"]["duration"]
     target_length = int(duration * sampling_rate / hopsize)
 
-    datamodule = WDSDataModule(**configs["datamodule"]["data_config"])
+    datamodule = build_datamodule(configs)
     _, val_loader, _ = datamodule.make_loader
     val_loader = WrappedDataLoader(val_loader, configs, stft_tool)
 

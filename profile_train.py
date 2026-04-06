@@ -7,7 +7,7 @@ import torch
 import time
 import numpy as np
 
-from data.wds_datamodule import WDSDataModule
+from data import build_datamodule
 from utils.audio import TacotronSTFT, get_mel_from_wav
 from utils.tools import instantiate_from_config
 from train import build_stft_tool, convert_wds_batch_to_model_format
@@ -98,7 +98,7 @@ def main():
 
     device = torch.device("cuda:0")
 
-    datamodule = WDSDataModule(**configs["datamodule"]["data_config"])
+    datamodule = build_datamodule(configs)
     train_loader, _, _ = datamodule.make_loader
     stft_tool = build_stft_tool(configs)
 

@@ -12,7 +12,7 @@ from pytorch_lightning.strategies.ddp import DDPStrategy
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
-from data.wds_datamodule import WDSDataModule
+from data import build_datamodule
 from utils.audio import TacotronSTFT, get_mel_from_wav
 from utils.tools import get_restore_step, instantiate_from_config
 
@@ -139,7 +139,7 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
     exp_name = configs["exp_name"]
     batch_size = configs["model"]["params"]["batchsize"]
 
-    datamodule = WDSDataModule(**configs["datamodule"]["data_config"])
+    datamodule = build_datamodule(configs)
     train_loader, val_loader, test_loader = datamodule.make_loader
 
     stft_tool = build_stft_tool(configs)
