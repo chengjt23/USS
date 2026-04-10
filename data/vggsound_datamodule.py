@@ -134,6 +134,8 @@ def create_vggsound_dataloader(
     else:
         dataset = wds.DataPipeline(
             wds.SimpleShardList(tar_paths),
+            wds.split_by_node,
+            wds.split_by_worker,
             wds.tarfile_to_samples(handler=wds.warn_and_continue),
             wds.shuffle(shuffle_buffer),
             wds.map(lambda sample: decode_sample_to_tensors(sample, sample_rate)),

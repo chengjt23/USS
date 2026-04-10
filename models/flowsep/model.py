@@ -1,6 +1,7 @@
 import os
 import sys
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
@@ -617,6 +618,19 @@ class DDPM(pl.LightningModule):
         tr_covmean = np.trace(covmean)
         return float(diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
 
+    def _gather_validation_tensor_list(self, tensor_list):
+        local_tensors = [tensor.detach().cpu() for tensor in tensor_list]
+        if dist.is_available() and dist.is_initialized():
+            gathered_tensors = [None for _ in range(dist.get_world_size())]
+            dist.all_gather_object(gathered_tensors, local_tensors)
+            local_tensors = []
+            for tensors in gathered_tensors:
+                if tensors:
+                    local_tensors.extend(tensors)
+        if len(local_tensors) == 0:
+            return None
+        return torch.cat(local_tensors, dim=0)
+
     def on_validation_epoch_start(self):
         self._fad_ref_embs = []
         self._fad_pred_embs = []
@@ -682,19 +696,24 @@ class DDPM(pl.LightningModule):
             except Exception as e:
                 raise RuntimeError(f"Failed in validation metric computation: {e}")
 
+        batch_size = batch["waveform"].shape[0] if "waveform" in batch else None
         self.log_dict(
         {k: float(v) for k, v in loss_dict.items()},
         prog_bar=True,
         logger=True,
         on_step=False,
         on_epoch=True,
+        sync_dist=True,
+        batch_size=batch_size,
         )
 
     def on_validation_epoch_end(self):
-        if hasattr(self, "_fad_ref_embs") and len(self._fad_ref_embs) > 0:
+        ref_all_tensor = self._gather_validation_tensor_list(self._fad_ref_embs)
+        pred_all_tensor = self._gather_validation_tensor_list(self._fad_pred_embs)
+        if ref_all_tensor is not None and pred_all_tensor is not None:
             try:
-                ref_all = torch.cat(self._fad_ref_embs, dim=0).float().numpy()
-                pred_all = torch.cat(self._fad_pred_embs, dim=0).float().numpy()
+                ref_all = ref_all_tensor.float().numpy()
+                pred_all = pred_all_tensor.float().numpy()
                 mu_r = np.mean(ref_all, axis=0)
                 mu_p = np.mean(pred_all, axis=0)
                 sigma_r = np.cov(ref_all, rowvar=False)
@@ -706,15 +725,15 @@ class DDPM(pl.LightningModule):
         self._fad_ref_embs = []
         self._fad_pred_embs = []
 
-        if hasattr(self, "_clap_pred_audio_embs") and len(self._clap_pred_audio_embs) > 0:
+        pred_audio_all = self._gather_validation_tensor_list(self._clap_pred_audio_embs)
+        ref_audio_all = self._gather_validation_tensor_list(self._clap_ref_audio_embs)
+        text_all = self._gather_validation_tensor_list(self._clap_text_embs)
+        if pred_audio_all is not None and ref_audio_all is not None:
             try:
                 import torch.nn.functional as F
-                pred_audio_all = torch.cat(self._clap_pred_audio_embs, dim=0)
-                ref_audio_all = torch.cat(self._clap_ref_audio_embs, dim=0)
                 clapscore_a = F.cosine_similarity(pred_audio_all, ref_audio_all, dim=1).mean().item()
                 self.log("val/clapscore_a", clapscore_a, prog_bar=False, logger=True)
-                if len(self._clap_text_embs) > 0:
-                    text_all = torch.cat(self._clap_text_embs, dim=0)
+                if text_all is not None:
                     min_n = min(text_all.shape[0], pred_audio_all.shape[0])
                     clapscore = (text_all[:min_n] * pred_audio_all[:min_n]).sum(-1).mean().item()
                     self.log("val/clapscore", clapscore, prog_bar=False, logger=True)

@@ -186,6 +186,8 @@ def create_wds_dataloader(
     else:
         pipeline = [
             wds.SimpleShardList(tar_paths),
+            wds.split_by_node,
+            wds.split_by_worker,
             wds.tarfile_to_samples(handler=wds.warn_and_continue),
             wds.shuffle(shuffle_buffer),
             wds.map(lambda sample: decode_sample_to_tensors(sample, sample_rate)),
@@ -215,6 +217,7 @@ class WDSDataModule(pl.LightningDataModule):
         test_dir: str = None,
         sample_rate: int = 32000,
         batch_size: int = 4,
+        val_batch_size: int = None,
         num_workers: int = 8,
         shuffle_buffer: int = 1000,
         drop_last: bool = False,
@@ -232,6 +235,7 @@ class WDSDataModule(pl.LightningDataModule):
         self.test_dir = test_dir
         self.sample_rate = sample_rate
         self.batch_size = batch_size
+        self.val_batch_size = val_batch_size if val_batch_size is not None else batch_size
         self.num_workers = num_workers
         self.shuffle_buffer = shuffle_buffer
         self.drop_last = drop_last
@@ -256,7 +260,7 @@ class WDSDataModule(pl.LightningDataModule):
         return create_wds_dataloader(
             root_dir=self.val_dir,
             sample_rate=self.sample_rate,
-            batch_size=self.batch_size,
+            batch_size=self.val_batch_size,
             num_workers=1,
             shuffle_buffer=0,
             drop_last=False,

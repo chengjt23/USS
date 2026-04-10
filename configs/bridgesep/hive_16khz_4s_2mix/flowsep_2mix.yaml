@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "flowsep-2mix-hive-16khz-4s-half_lr-batchsize32"
+exp_name: "flowsep-2mix-hive-16khz-4s-half_lr1e-4-batchsize128"
 project: "USS"
 precision: "medium"
 
@@ -11,7 +11,8 @@ datamodule:
     val_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/val
     test_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/test
     sample_rate: 16000
-    batch_size: 32
+    batch_size: 128
+    val_batch_size: 32
     num_workers: 8
     shuffle_buffer: 1000
     drop_last: false
@@ -21,7 +22,7 @@ datamodule:
 step:
   validation_every_n_epochs: 1
   save_checkpoint_every_n_steps: 10000
-  limit_train_batches: 1000
+  limit_train_batches: 125 # 直接决定每个epoch有多少steps，batchsize调整后也要调这个
   max_steps: 200000
   save_top_k: 4
 
@@ -45,7 +46,7 @@ augmentation:
 model:
   target: models.flowsep.model.LatentDiffusion
   params:
-    base_learning_rate: 2.5e-05
+    base_learning_rate: 1e-04
     sampling_rate: 16000
     batchsize: 4
     linear_start: 0.0015
