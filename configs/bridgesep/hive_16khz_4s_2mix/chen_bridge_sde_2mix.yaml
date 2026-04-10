@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "chen_bridge_sde-2mix_hive-16khz-4s"
+exp_name: "chen_bridge_sde-2mix_hive-16khz-4s-lr1e-5-cosdecay1e-6"
 project: "USS"
 precision: "medium"
 
@@ -48,7 +48,11 @@ augmentation:
 model:
   target: models.flowsep.model.LatentDiffusion
   params:
-    base_learning_rate: 5.0e-05
+    base_learning_rate: 1.0e-05
+    lr_warmup_steps: 5000
+    lr_max: 1.0e-05
+    lr_min: 1.0e-06
+    lr_decay_until_step: 50000
     sampling_rate: 16000
     batchsize: 4
     linear_start: 0.0015
