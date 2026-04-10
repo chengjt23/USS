@@ -144,11 +144,7 @@ class LatentDiffusionDACVAE(LatentDiffusion):
                     samples = samples[:, :self.channels, :, :]
 
                 wav_out = self.decode_first_stage(samples)
-                if wav_out.ndim == 3:
-                    waveform = wav_out.unsqueeze(1)
-                else:
-                    waveform = wav_out
-                waveform = waveform.cpu().detach().float().numpy()
+                waveform = wav_out.cpu().detach().float().numpy()
 
                 if n_gen >= 3 and self.use_clap:
                     try:

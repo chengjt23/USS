@@ -9,7 +9,7 @@ class DACVAEFirstStage(nn.Module):
                  latent_dim=1024, decoder_dim=1536, decoder_rates=[12, 10, 8, 2],
                  n_codebooks=16, codebook_size=1024, codebook_dim=128,
                  quantizer_dropout=False, sample_rate=48000,
-                 reshape_channels=8, data_sample_rate=44100, ckpt_path=None):
+                 reshape_channels=8, data_sample_rate=44100, duration=4.0, ckpt_path=None):
         super().__init__()
         model = dacvae.DACVAE(
             encoder_dim=encoder_dim, encoder_rates=encoder_rates,
@@ -28,6 +28,7 @@ class DACVAEFirstStage(nn.Module):
         self.data_sr = data_sample_rate
         self.reshape_channels = reshape_channels
         self.freq_dim = latent_dim // reshape_channels
+        self.max_samples = int(duration * data_sample_rate)
         if ckpt_path is not None:
             self._load_ckpt(ckpt_path)
 
@@ -57,7 +58,16 @@ class DACVAEFirstStage(nn.Module):
             return wav
         return torchaudio.functional.resample(wav, from_sr, to_sr)
 
+    def _truncate_pad(self, wav):
+        T = wav.size(-1)
+        if T > self.max_samples:
+            wav = wav[..., :self.max_samples]
+        elif T < self.max_samples:
+            wav = torch.nn.functional.pad(wav, (0, self.max_samples - T))
+        return wav
+
     def encode(self, waveform):
+        waveform = self._truncate_pad(waveform)
         with torch.no_grad(), torch.backends.cudnn.flags(enabled=False):
             wav = self._resample(waveform, self.data_sr, self.codec_sr)
             z = self.encoder(self._pad(wav))
