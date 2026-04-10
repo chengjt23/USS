@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "flowsep-2mix-hive-16khz-4s-half_lr5e-5-batchsize64"
+exp_name: "flowsep-2mix-hive-16khz-4s-half_lr1e-5-batchsize64"
 project: "USS"
 precision: "medium"
 
@@ -48,7 +48,7 @@ augmentation:
 model:
   target: models.flowsep.model.LatentDiffusion
   params:
-    base_learning_rate: 5.0e-05
+    base_learning_rate: 1.0e-05
     sampling_rate: 16000
     batchsize: 4
     linear_start: 0.0015
