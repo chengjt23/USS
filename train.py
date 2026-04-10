@@ -38,13 +38,10 @@ def wav_feature_extraction(waveform, stft_tool):
         waveform = waveform.squeeze(1)
     if waveform.dim() == 1:
         waveform = waveform.unsqueeze(0)
-    log_mel_specs, stfts = [], []
-    for i in range(waveform.shape[0]):
-        wav_tensor = torch.FloatTensor(waveform[i].numpy() if isinstance(waveform[i], torch.Tensor) else waveform[i])
-        log_mel_spec, stft, energy = get_mel_from_wav(wav_tensor, stft_tool)
-        log_mel_specs.append(torch.FloatTensor(log_mel_spec.T))
-        stfts.append(torch.FloatTensor(stft.T))
-    return torch.stack(log_mel_specs, dim=0), torch.stack(stfts, dim=0)
+    log_mel_spec, stft, energy = get_mel_from_wav(waveform, stft_tool, return_numpy=False)
+    log_mel_spec = log_mel_spec.transpose(1, 2).contiguous().float()
+    stft = stft.transpose(1, 2).contiguous().float()
+    return log_mel_spec, stft
 
 
 def pad_spec(spec, target_length):
@@ -116,20 +113,37 @@ def convert_wds_batch_to_model_format(batch, config, stft_tool):
 
 
 class WrappedDataLoader:
-    def __init__(self, base_loader, config, stft_tool):
+    def __init__(self, base_loader, config, stft_tool, prefetch_batches=8):
         self.base_loader = base_loader
         self.config = config
         self.stft_tool = stft_tool
+        self.prefetch_batches = prefetch_batches
+
+    def _pin_memory(self, item):
+        if not torch.cuda.is_available():
+            return item
+        if torch.is_tensor(item):
+            if item.device.type == "cpu":
+                return item.pin_memory()
+            return item
+        if isinstance(item, dict):
+            return {k: self._pin_memory(v) for k, v in item.items()}
+        if isinstance(item, list):
+            return [self._pin_memory(v) for v in item]
+        if isinstance(item, tuple):
+            return tuple(self._pin_memory(v) for v in item)
+        return item
 
     def __iter__(self):
         import threading, queue
-        q = queue.Queue(maxsize=2)
+        q = queue.Queue(maxsize=self.prefetch_batches)
         sentinel = object()
 
         def _producer():
             try:
                 for raw in self.base_loader:
-                    q.put(convert_wds_batch_to_model_format(raw, self.config, self.stft_tool))
+                    batch = convert_wds_batch_to_model_format(raw, self.config, self.stft_tool)
+                    q.put(self._pin_memory(batch))
             except Exception as e:
                 print(f"[WrappedDataLoader] producer error: {e}")
             finally:

@@ -145,11 +145,27 @@ class TacotronSTFT(torch.nn.Module):
         return mel_output, magnitudes, phases, energy
 
 
-def get_mel_from_wav(audio, _stft):
-    audio = torch.clip(torch.FloatTensor(audio).unsqueeze(0), -1, 1)
-    audio = torch.autograd.Variable(audio, requires_grad=False)
-    melspec, magnitudes, phases, energy = _stft.mel_spectrogram(audio)
-    melspec = torch.squeeze(melspec, 0).numpy().astype(np.float32)
-    magnitudes = torch.squeeze(magnitudes, 0).numpy().astype(np.float32)
-    energy = torch.squeeze(energy, 0).numpy().astype(np.float32)
+def get_mel_from_wav(audio, _stft, return_numpy=True):
+    if torch.is_tensor(audio):
+        audio = audio.detach().float()
+    else:
+        audio = torch.as_tensor(audio, dtype=torch.float32)
+    if audio.dim() == 1:
+        audio = audio.unsqueeze(0)
+    elif audio.dim() == 3 and audio.size(1) == 1:
+        audio = audio.squeeze(1)
+    audio = torch.clamp(audio, -1, 1)
+    with torch.no_grad():
+        melspec, magnitudes, phases, energy = _stft.mel_spectrogram(audio)
+    if return_numpy:
+        melspec = melspec.cpu()
+        magnitudes = magnitudes.cpu()
+        energy = energy.cpu()
+        if melspec.size(0) == 1:
+            melspec = torch.squeeze(melspec, 0)
+            magnitudes = torch.squeeze(magnitudes, 0)
+            energy = torch.squeeze(energy, 0)
+        melspec = melspec.numpy().astype(np.float32)
+        magnitudes = magnitudes.numpy().astype(np.float32)
+        energy = energy.numpy().astype(np.float32)
     return melspec, magnitudes, energy
