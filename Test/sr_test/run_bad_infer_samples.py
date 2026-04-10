@@ -14,7 +14,7 @@ import yaml
 SCRIPT_PATH = Path(__file__).resolve()
 SCRIPT_DIR = SCRIPT_PATH.parent
 USS_ROOT = SCRIPT_PATH.parents[2]
-DEFAULT_CONFIG = USS_ROOT / "configs" / "bridgesep" / "hive_2mix" / "flowsep_2mix.yaml"
+DEFAULT_CONFIG = USS_ROOT / "configs" / "bridgesep" / "hive_2mix" / "chen_bridge_sde_2mix_half_lr.yaml"
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "bad_infer_outputs"
 
 if str(USS_ROOT) not in sys.path:
