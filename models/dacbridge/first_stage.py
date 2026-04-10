@@ -1,7 +1,10 @@
+import json
+import os
+import dacvae
 import torch
 import torch.nn as nn
 import torchaudio
-import dacvae
+from huggingface_hub import snapshot_download
 
 
 class DACVAEFirstStage(nn.Module):
@@ -9,8 +12,23 @@ class DACVAEFirstStage(nn.Module):
                  latent_dim=1024, decoder_dim=1536, decoder_rates=[12, 10, 8, 2],
                  n_codebooks=16, codebook_size=1024, codebook_dim=128,
                  quantizer_dropout=False, sample_rate=48000,
-                 reshape_channels=8, data_sample_rate=44100, duration=4.0, ckpt_path=None):
+                 reshape_channels=8, data_sample_rate=44100, duration=4.0,
+                 ckpt_path=None, pretrained_model_name_or_path=None, cache_dir=None):
         super().__init__()
+        pretrained_dir = None
+        if pretrained_model_name_or_path is not None:
+            pretrained_dir = self._resolve_pretrained_dir(pretrained_model_name_or_path, cache_dir)
+            codec_config = self._load_pretrained_config(pretrained_dir)
+            encoder_dim = codec_config.get("encoder_dim", encoder_dim)
+            encoder_rates = codec_config.get("encoder_rates", encoder_rates)
+            latent_dim = codec_config.get("latent_dim", latent_dim)
+            decoder_dim = codec_config.get("decoder_dim", decoder_dim)
+            decoder_rates = codec_config.get("decoder_rates", decoder_rates)
+            n_codebooks = codec_config.get("n_codebooks", n_codebooks)
+            codebook_size = codec_config.get("codebook_size", codebook_size)
+            codebook_dim = codec_config.get("codebook_dim", codebook_dim)
+            quantizer_dropout = codec_config.get("quantizer_dropout", quantizer_dropout)
+            sample_rate = codec_config.get("sample_rate", sample_rate)
         model = dacvae.DACVAE(
             encoder_dim=encoder_dim, encoder_rates=encoder_rates,
             latent_dim=latent_dim, decoder_dim=decoder_dim,
@@ -29,8 +47,20 @@ class DACVAEFirstStage(nn.Module):
         self.reshape_channels = reshape_channels
         self.freq_dim = latent_dim // reshape_channels
         self.max_samples = int(duration * data_sample_rate)
-        if ckpt_path is not None:
+        if pretrained_dir is not None:
+            self._load_ckpt(os.path.join(pretrained_dir, "checkpoint.pt"))
+        elif ckpt_path is not None:
             self._load_ckpt(ckpt_path)
+
+    def _resolve_pretrained_dir(self, model_name_or_path, cache_dir=None):
+        if os.path.isdir(model_name_or_path):
+            return model_name_or_path
+        return snapshot_download(repo_id=model_name_or_path, cache_dir=cache_dir)
+
+    def _load_pretrained_config(self, model_dir):
+        with open(os.path.join(model_dir, "config.json"), "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return config.get("audio_codec", {})
 
     def _load_ckpt(self, path):
         sd = torch.load(path, map_location="cpu")
