@@ -426,10 +426,6 @@ class UNetModel(nn.Module):
             self.film_emb = nn.Linear(self.extra_film_condition_dim, time_embed_dim)
             if self.concate_film:
                 self.concate_emb = nn.Linear(self.concate_film, time_embed_dim)
-            print(
-                "+ Use extra condition on UNet channel using Film. Extra condition dimension is %s. "
-                % self.extra_film_condition_dim
-            )
 
         if context_dim is not None and not use_spatial_transformer:
             assert (
@@ -705,9 +701,6 @@ class UNetModel(nn.Module):
         self.output_blocks.apply(convert_module_to_f32)
 
     def forward(self, x, timesteps=None, y=None, context_list=None, context_attn_mask_list=None, **kwargs):
-        if not self.shape_reported:
-            print("The shape of UNet input is", x.size())
-            self.shape_reported = True
         assert (y is not None) == (
             self.num_classes is not None or self.extra_film_condition_dim is not None
         ), "must specify y if and only if the model is class-conditional or film embedding conditional"

@@ -8,6 +8,7 @@ import yaml
 import torch
 import numpy as np
 import math
+import warnings
 import logging
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.strategies.ddp import DDPStrategy
@@ -20,6 +21,21 @@ from utils.tools import get_restore_step, instantiate_from_config
 
 logging.getLogger('fsspec').setLevel(logging.ERROR)
 logging.getLogger('numba').setLevel(logging.WARNING)
+
+
+def configure_runtime_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Grad strides do not match bucket view strides\.",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"The AccumulateGrad node's stream does not match the stream of the node that produced the incoming gradient\.",
+        category=UserWarning,
+    )
+    if hasattr(torch.autograd, "graph") and hasattr(torch.autograd.graph, "set_warn_on_accumulate_grad_stream_mismatch"):
+        torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
 
 
 def build_stft_tool(config):
@@ -167,6 +183,7 @@ class WrappedDataLoader:
 
 
 def main(configs, config_yaml_path, exp_group_name, exp_name):
+    configure_runtime_warnings()
     if "seed" in configs.keys():
         seed_everything(configs["seed"])
     else:

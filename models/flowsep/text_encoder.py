@@ -8,7 +8,6 @@ import math
 class FlanT5HiddenState(nn.Module):
     def __init__(self, text_encoder_name="google/flan-t5-large", freeze_text_encoder=True, emb_num=3, return_length=50, input_caption=False, all_pos=False):
         super().__init__()
-        print("the cache dir is", os.getenv('TRANSFORMERS_CACHE'))
         self.emb_num = emb_num
         self.return_length = return_length
         self.freeze_text_encoder = freeze_text_encoder
@@ -26,8 +25,6 @@ class FlanT5HiddenState(nn.Module):
                 self.model.eval()
                 for p in self.model.parameters():
                     p.requires_grad = False
-            else:
-                print("=> The text encoder is learnable")
 
         self.empty_hidden_state_cfg = None
         self.device = None

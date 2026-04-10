@@ -2,6 +2,7 @@ import importlib
 import os
 import json
 import numpy as np
+import torch.distributed as dist
 from inspect import isfunction
 
 
@@ -15,10 +16,27 @@ def default(val, d):
     return d() if isfunction(d) else d
 
 
+def is_rank_zero():
+    rank = os.getenv("RANK")
+    local_rank = os.getenv("LOCAL_RANK")
+    if rank is not None:
+        return int(rank) == 0
+    if local_rank is not None:
+        return int(local_rank) == 0
+    if not dist.is_available() or not dist.is_initialized():
+        return True
+    return dist.get_rank() == 0
+
+
+def rank_zero_print(*args, **kwargs):
+    if is_rank_zero():
+        print(*args, **kwargs)
+
+
 def count_params(model, verbose=False):
     total_params = sum(p.numel() for p in model.parameters())
     if verbose:
-        print(f"{model.__class__.__name__} has {total_params * 1.e-6:.2f} M params.")
+        rank_zero_print(f"{model.__class__.__name__} has {total_params * 1.e-6:.2f} M params.")
     return total_params
 
 

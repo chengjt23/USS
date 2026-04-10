@@ -18,6 +18,7 @@ from utils.tools import (
     exists,
     default,
     count_params,
+    rank_zero_print,
     instantiate_from_config,
 )
 from utils.diffusion import (
@@ -189,7 +190,7 @@ class DDPM(pl.LightningModule):
         assert parameterization in ["eps", "x0", "v"], 'currently only supporting "eps" and "x0" and "v"'
         self.parameterization = parameterization
         self.state = None
-        print(
+        rank_zero_print(
             f"{self.__class__.__name__}: Running in {self.parameterization}-prediction mode"
         )
         assert sampling_rate is not None
@@ -202,8 +203,6 @@ class DDPM(pl.LightningModule):
 
         if self.global_rank == 0:
             self.evaluator = evaluator
-
-        self.initialize_param_check_toolkit()
 
         self.latent_t_size = latent_t_size
         self.latent_f_size = latent_f_size
@@ -218,7 +217,6 @@ class DDPM(pl.LightningModule):
         self.use_ema = use_ema
         if self.use_ema:
             self.model_ema = LitEma(self.model)
-            print(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
 
         self.use_scheduler = scheduler_config is not None
         if self.use_scheduler:
@@ -377,20 +375,20 @@ class DDPM(pl.LightningModule):
         for k in keys:
             for ik in ignore_keys:
                 if k.startswith(ik):
-                    print("Deleting key {} from state_dict.".format(k))
+                    rank_zero_print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
         missing, unexpected = (
             self.load_state_dict(sd, strict=False)
             if not only_model
             else self.model.load_state_dict(sd, strict=False)
         )
-        print(
+        rank_zero_print(
             f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys"
         )
         if len(missing) > 0:
-            print(f"Missing Keys: {missing}")
+            rank_zero_print(f"Missing Keys: {missing}")
         if len(unexpected) > 0:
-            print(f"Unexpected Keys: {unexpected}")
+            rank_zero_print(f"Unexpected Keys: {unexpected}")
 
     def q_mean_variance(self, x_start, t):
         mean = extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
@@ -493,9 +491,6 @@ class DDPM(pl.LightningModule):
         max_lr = self.lr_max
         min_lr = self.lr_min
         decay_until = self.lr_decay_until_step
-
-        if step == 0:
-            print("Warming up learning rate start with %s" % self.initial_learning_rate)
 
         if decay_until is not None:
             import math
@@ -698,7 +693,7 @@ class DDPM(pl.LightningModule):
         batch_size = batch["waveform"].shape[0] if "waveform" in batch else None
         self.log_dict(
         {k: float(v) for k, v in loss_dict.items()},
-        prog_bar=True,
+        prog_bar=False,
         logger=True,
         on_step=False,
         on_epoch=True,
@@ -718,7 +713,7 @@ class DDPM(pl.LightningModule):
                 sigma_r = np.cov(ref_all, rowvar=False)
                 sigma_p = np.cov(pred_all, rowvar=False)
                 fad = self._frechet_distance(mu_r, sigma_r, mu_p, sigma_p)
-                self.log("val/fad", fad, prog_bar=False, logger=True)
+                self.log("val/fad", fad, prog_bar=True, logger=True)
             except Exception as e:
                 raise RuntimeError(f"Failed to compute FAD: {e}")
         self._fad_ref_embs = []
@@ -731,11 +726,11 @@ class DDPM(pl.LightningModule):
             try:
                 import torch.nn.functional as F
                 clapscore_a = F.cosine_similarity(pred_audio_all, ref_audio_all, dim=1).mean().item()
-                self.log("val/clapscore_a", clapscore_a, prog_bar=False, logger=True)
+                self.log("val/clapscore_a", clapscore_a, prog_bar=True, logger=True)
                 if text_all is not None:
                     min_n = min(text_all.shape[0], pred_audio_all.shape[0])
                     clapscore = (text_all[:min_n] * pred_audio_all[:min_n]).sum(-1).mean().item()
-                    self.log("val/clapscore", clapscore, prog_bar=False, logger=True)
+                    self.log("val/clapscore", clapscore, prog_bar=True, logger=True)
             except Exception as e:
                 raise RuntimeError(f"Failed to compute CLAPScore: {e}")
         self._clap_text_embs = []
@@ -744,51 +739,6 @@ class DDPM(pl.LightningModule):
 
     def get_validation_folder_name(self):
         return "val_%s_cfg_scale_%s_ddim_%s_n_cand_%s" % (self.global_step, self.evaluation_params["unconditional_guidance_scale"], self.evaluation_params["ddim_sampling_steps"], self.evaluation_params["n_candidates_per_samples"])
-
-    def initialize_param_check_toolkit(self):
-        self.tracked_steps = 0
-        self.param_dict = {}
-
-    def statistic_require_grad_tensor_number(self, module, name=None):
-        requires_grad_num = 0
-        total_num = 0
-        require_grad_tensor = None
-        for p in module.parameters():
-            if p.requires_grad: 
-                requires_grad_num += 1
-                if require_grad_tensor is None:
-                    require_grad_tensor = p
-            total_num += 1
-        print("Module: [%s] have %s trainable parameters out of %s total parameters (%.2f)" % (name, requires_grad_num, total_num, requires_grad_num/total_num))
-        return require_grad_tensor
-
-    def check_module_param_update(self):
-        if self.tracked_steps == 0:
-            for name, module in self.named_children():
-                try:
-                    require_grad_tensor = self.statistic_require_grad_tensor_number(module, name=name)
-                    if require_grad_tensor is not None:
-                        self.param_dict[name] = require_grad_tensor.clone()
-                    else:
-                        print("==> %s does not requires grad" % name)
-                except Exception as e: 
-                    print("%s does not have trainable parameters: %s" % (name, e))
-                    continue
-
-        if self.tracked_steps % 5000 == 0:
-            for name, module in self.named_children():
-                try:
-                    require_grad_tensor = self.statistic_require_grad_tensor_number(module, name=name)
-
-                    if require_grad_tensor is not None:
-                        print("===> Param diff %s: %s; Size: %s" % (name, torch.sum(torch.abs(self.param_dict[name] - require_grad_tensor)), require_grad_tensor.size()))
-                    else:
-                        print("%s does not requires grad" % name)
-                except Exception as e:
-                    print("%s does not have trainable parameters: %s" % (name, e))
-                    continue
-
-        self.tracked_steps += 1
 
 
 class LatentDiffusion(DDPM):
@@ -981,14 +931,11 @@ class LatentDiffusion(DDPM):
                 params = params + list(each.parameters())
 
         if self.learn_logvar:
-            print("Diffusion model optimizing logvar")
             params.append(self.logvar)
         opt = torch.optim.AdamW(params, lr=lr)
         if self.use_scheduler:
             assert "target" in self.scheduler_config
             scheduler = instantiate_from_config(self.scheduler_config)
-
-            print("Setting up LambdaLR scheduler...")
             scheduler = [
                 {
                     "scheduler": LambdaLR(opt, lr_lambda=scheduler.schedule),
@@ -1021,15 +968,12 @@ class LatentDiffusion(DDPM):
             and batch_idx == 0
             and not self.restarted_from_ckpt
         ):
-            print("### USING STD-RESCALING ###")
             x = super().get_input(batch, self.first_stage_key)
             x = x.to(self.device)
             encoder_posterior = self.encode_first_stage(x)
             z = self.get_first_stage_encoding(encoder_posterior).detach()
             del self.scale_factor
             self.register_buffer("scale_factor", 1.0 / z.flatten().std())
-            print(f"setting self.scale_factor to {self.scale_factor}")
-            print("### USING STD-RESCALING ###")
 
     def register_schedule(
         self,
@@ -1230,7 +1174,6 @@ class LatentDiffusion(DDPM):
         return new_cond_dict
 
     def shared_step(self, batch, **kwargs):
-        self.check_module_param_update()
         if self.training:
             unconditional_prob_cfg = self.unconditional_prob_cfg
         else:
@@ -1254,9 +1197,6 @@ class LatentDiffusion(DDPM):
     
     def training_step(self, batch, batch_idx):
         self.warmup_step()
-
-        if self.clap_trainable:
-            print("clap is trainiable in this mode")
 
         if (
             self.state is None
@@ -1289,7 +1229,6 @@ class LatentDiffusion(DDPM):
                     on_step=True,
                     on_epoch=False,
                 )
-                print(k, self.metrics_buffer[k])
             self.metrics_buffer = {}
         
         loss, loss_dict = self.shared_step(batch)
@@ -1308,11 +1247,22 @@ class LatentDiffusion(DDPM):
 
         self.log_dict(
             {k: float(v) for k, v in loss_dict.items()},
-            prog_bar=True,
+            prog_bar=False,
             logger=True,
             on_step=True,
             on_epoch=True,
         )
+
+        for key in ("train/loss_simple", "train/loss_vlb", "train/loss"):
+            if key in loss_dict:
+                self.log(
+                    key,
+                    float(loss_dict[key]),
+                    prog_bar=True,
+                    logger=False,
+                    on_step=True,
+                    on_epoch=False,
+                )
 
         self.log(
             "global_step",
@@ -1967,15 +1917,15 @@ class LatentDiffusion(DDPM):
                                 best_index.append(i + max_index * z.shape[0])
                             waveform = waveform[best_index]
                         except Exception as e:
-                            print("Warning: while calculating CLAP score (not fatal), ", e)
-                    else:
-                        waveform = waveform[0]
-
-                if save:
-                    self.save_waveform(waveform, waveform_save_path, name=fnames)
-                    return waveform
+                            rank_zero_print("Warning: while calculating CLAP score (not fatal), ", e)
                 else:
-                    return waveform
+                    waveform = waveform[0]
+
+            if save:
+                self.save_waveform(waveform, waveform_save_path, name=fnames)
+                return waveform
+            else:
+                return waveform
 
 
 class DiffusionWrapper(pl.LightningModule):
@@ -2034,20 +1984,6 @@ class DiffusionWrapper(pl.LightningModule):
                 continue
             else:
                 raise NotImplementedError()
-        
-        if not self.being_verbosed_once:
-            print("The input shape to the diffusion model is as follows:")
-            print("xc", xc.size())
-            print("t", t.size())
-            if context_list is not None: 
-                for i in range(len(context_list)):
-                    print("context_%s" % i, context_list[i].size(), attn_mask_list[i].size())
-            if y is not None:
-                if isinstance(y, list):
-                    print(f"y has two conditions, y1 shape is {y[0].size()} and y2 shape is {y[1].size()}")
-                else:
-                    print("y", y.size())
-            self.being_verbosed_once = True
 
         out = self.diffusion_model(xc, t, context_list=context_list, y=y, context_attn_mask_list=attn_mask_list)
         return out
