@@ -225,12 +225,14 @@ class WDSDataModule(pl.LightningDataModule):
         mix_selected: list = None,
         data_ratio: float = 1.0,
         val_tar_count: int = 2,
+        val_samples_per_tar: int = None,
     ):
         super().__init__()
         self.train_dir = train_dir
         self.mix_selected = mix_selected
         self.data_ratio = data_ratio
         self.val_tar_count = val_tar_count
+        self.val_samples_per_tar = val_samples_per_tar
         self.val_dir = val_dir
         self.test_dir = test_dir
         self.sample_rate = sample_rate
