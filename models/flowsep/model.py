@@ -1245,23 +1245,28 @@ class LatentDiffusion(DDPM):
         #         flush=True,
         #     )
 
-        self.log_dict(
-            {k: float(v) for k, v in loss_dict.items()},
-            prog_bar=False,
-            logger=True,
-            on_step=True,
-            on_epoch=True,
-        )
+        primary_loss_keys = ("train/loss_simple", "train/loss_vlb", "train/loss")
+        other_loss_dict = {
+            k: float(v) for k, v in loss_dict.items() if k not in primary_loss_keys
+        }
+        if len(other_loss_dict) > 0:
+            self.log_dict(
+                other_loss_dict,
+                prog_bar=False,
+                logger=True,
+                on_step=True,
+                on_epoch=True,
+            )
 
-        for key in ("train/loss_simple", "train/loss_vlb", "train/loss"):
+        for key in primary_loss_keys:
             if key in loss_dict:
                 self.log(
                     key,
                     float(loss_dict[key]),
                     prog_bar=True,
-                    logger=False,
+                    logger=True,
                     on_step=True,
-                    on_epoch=False,
+                    on_epoch=True,
                 )
 
         self.log(
