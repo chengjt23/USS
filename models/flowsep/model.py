@@ -11,7 +11,6 @@ from torch.optim.lr_scheduler import LambdaLR
 from einops import rearrange, repeat
 from contextlib import contextmanager
 from functools import partial
-from tqdm import tqdm
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 import soundfile as sf
 
@@ -1724,7 +1723,7 @@ class LatentDiffusion(DDPM):
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=self.device)
         t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
 
-        for step in tqdm(range(1, len(t_span))):
+        for step in range(1, len(t_span)):
             t_batch = t.view(1).expand(batch_size)
             model_out = self._model_forward(x, t_batch, cond, x_T)
             dphi_dt = self._to_velocity(model_out, x, t_batch, x_T)

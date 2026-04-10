@@ -7,6 +7,7 @@ import argparse
 import yaml
 import torch
 import numpy as np
+import math
 import logging
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.strategies.ddp import DDPStrategy
@@ -113,11 +114,12 @@ def convert_wds_batch_to_model_format(batch, config, stft_tool):
 
 
 class WrappedDataLoader:
-    def __init__(self, base_loader, config, stft_tool, prefetch_batches=8):
+    def __init__(self, base_loader, config, stft_tool, prefetch_batches=8, explicit_length=None):
         self.base_loader = base_loader
         self.config = config
         self.stft_tool = stft_tool
         self.prefetch_batches = prefetch_batches
+        self.explicit_length = explicit_length
 
     def _pin_memory(self, item):
         if not torch.cuda.is_available():
@@ -159,6 +161,8 @@ class WrappedDataLoader:
         t.join()
 
     def __len__(self):
+        if self.explicit_length is not None:
+            return self.explicit_length
         return len(self.base_loader)
 
 
@@ -179,12 +183,23 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
 
     datamodule = build_datamodule(configs)
     train_loader, val_loader, test_loader = datamodule.make_loader
+    device_count = torch.cuda.device_count()
+
+    data_config = configs.get("datamodule", {}).get("data_config", {})
+    val_progress_total = None
+    val_tar_count = data_config.get("val_tar_count")
+    val_samples_per_tar = data_config.get("val_samples_per_tar")
+    if val_loader is not None and val_tar_count is not None and val_samples_per_tar is not None:
+        mix_selected = data_config.get("mix_selected")
+        selected_dir_count = len(mix_selected) if mix_selected is not None else 1
+        total_selected_tars = val_tar_count * selected_dir_count
+        local_tar_count = math.ceil(total_selected_tars / max(device_count, 1))
+        val_batch_size = data_config.get("val_batch_size", data_config.get("batch_size", 1))
+        val_progress_total = math.ceil(local_tar_count * val_samples_per_tar / val_batch_size)
 
     stft_tool = build_stft_tool(configs)
     loader = WrappedDataLoader(train_loader, configs, stft_tool)
-    val_loader = WrappedDataLoader(val_loader, configs, stft_tool)
-
-    device_count = torch.cuda.device_count()
+    val_loader = WrappedDataLoader(val_loader, configs, stft_tool, explicit_length=val_progress_total)
     config_reload_from_ckpt = configs.get("reload_from_ckpt")
     limit_val_batches = configs.get("step", {}).get("limit_val_batches")
     limit_train_batches = configs.get("step", {}).get("limit_train_batches", 10000)
