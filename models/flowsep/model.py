@@ -1919,7 +1919,7 @@ class LatentDiffusion(DDPM):
                         except Exception as e:
                             rank_zero_print("Warning: while calculating CLAP score (not fatal), ", e)
                 else:
-                    waveform = waveform[0]
+                    waveform = waveform[: z.shape[0]]
 
             if save:
                 self.save_waveform(waveform, waveform_save_path, name=fnames)
