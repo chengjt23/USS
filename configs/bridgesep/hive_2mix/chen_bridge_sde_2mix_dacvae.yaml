@@ -1,0 +1,117 @@
+log_directory: "model_logs"
+exp_group: "uss"
+exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-lr5e-5-batchsize64"
+project: "USS"
+precision: "medium"
+
+datamodule:
+  data_name: WDSDataModule
+  data_config:
+    train_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/train
+    val_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/val
+    test_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/test
+    sample_rate: 44100
+    batch_size: 64
+    val_batch_size: 8
+    val_tar_count: 8
+    val_samples_per_tar: 500
+    num_workers: 8
+    shuffle_buffer: 1000
+    drop_last: false
+    persistent_workers: true
+    mix_selected: [2mix]
+
+step:
+  validation_every_n_epochs: 1
+  save_checkpoint_every_n_steps: 10000
+  limit_train_batches: 250
+  max_steps: 200000
+  save_top_k: 4
+
+preprocessing:
+  audio:
+    sampling_rate: 44100
+    max_wav_value: 32768.0
+    duration: 4.0
+  stft:
+    filter_length: 1024
+    hop_length: 441
+    win_length: 1024
+  mel:
+    n_mel_channels: 64
+    mel_fmin: 0
+    mel_fmax: 22050
+
+augmentation:
+  mixup: 0.0
+
+model:
+  target: models.dacbridge.model.LatentDiffusionDACVAE
+  params:
+    base_learning_rate: 5.0e-05
+    lr_warmup_steps: 5000
+    lr_max: 1.0e-05
+    lr_min: 1.0e-06
+    lr_decay_until_step: 50000
+    sampling_rate: 44100
+    batchsize: 4
+    linear_start: 0.0015
+    linear_end: 0.0195
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    unconditional_prob_cfg: 0.1
+    parameterization: eps
+    first_stage_key: waveform
+    latent_t_size: 100
+    latent_f_size: 128
+    channels: 8
+    extra_channels: true
+    extra_channel_key: mixed_waveform
+    monitor: val/loss_simple_ema
+    scale_by_std: true
+    clap_trainable: false
+    retrival_num: 0
+    use_clap: false
+    euler: true
+    bridge_mode: true
+    sb_schedule: true
+    sb_rho: 1.0
+    chen_bridge: true
+    chen_sampler_type: "sde"
+    data_prediction: true
+    use_ei_solver: true
+    unet_config:
+      target: models.flowsep.unet.UNetModel
+      params:
+        image_size: 128
+        context_dim: [1024]
+        in_channels: 16
+        out_channels: 16
+        model_channels: 128
+        attention_resolutions: [8, 4, 2]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 3, 5]
+        num_head_channels: 32
+        use_spatial_transformer: true
+        transformer_depth: 1
+    first_stage_config:
+      target: models.dacbridge.first_stage.DACVAEFirstStage
+      params:
+        sample_rate: 48000
+        data_sample_rate: 44100
+        latent_dim: 1024
+        reshape_channels: 8
+        ckpt_path: null
+    cond_stage_config:
+      crossattn_text:
+        cond_stage_key: caption
+        conditioning_key: crossattn
+        target: models.flowsep.text_encoder.FlanT5HiddenState
+        params:
+          emb_num: 1
+          input_caption: true
+    evaluation_params:
+      unconditional_guidance_scale: 1.0
+      ddim_sampling_steps: 10
+      n_candidates_per_samples: 1
