@@ -13,6 +13,7 @@ datamodule:
     sample_rate: 16000
     batch_size: 128
     val_batch_size: 32
+    val_tar_count: 8
     num_workers: 8
     shuffle_buffer: 1000
     drop_last: false
