@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-lr5e-5-batchsize32"
+exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-lr3e-5-batchsize32"
 project: "USS"
 precision: "medium"
 
@@ -48,10 +48,10 @@ augmentation:
 model:
   target: models.dacbridge.model.LatentDiffusionDACVAE
   params:
-    base_learning_rate: 5.0e-05
+    base_learning_rate: 5.0e-05 # will not be used if lr_max and lr_min are set
     lr_warmup_steps: 5000
-    lr_max: 1.0e-05
-    lr_min: 1.0e-06
+    lr_max: 3.0e-05
+    lr_min: 3.0e-06
     lr_decay_until_step: 50000
     sampling_rate: 44100
     batchsize: 4
