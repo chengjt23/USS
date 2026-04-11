@@ -12,7 +12,7 @@ datamodule:
     test_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/test
     sample_rate: 44100
     batch_size: 32
-    val_batch_size: 8
+    val_batch_size: 32
     val_tar_count: 8
     val_samples_per_tar: 500
     num_workers: 8
