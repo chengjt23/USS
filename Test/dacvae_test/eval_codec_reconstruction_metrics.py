@@ -23,6 +23,8 @@ DEFAULT_CONFIG = USS_ROOT / "configs" / "dacvae-bridge" / "hive-2mix-44100hz-4s"
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "outputs"
 DEFAULT_PANNS_CKPT = WORKSPACE_ROOT / "Cnn14_16k_mAP=0.438.pth"
 DEFAULT_CLAP_CKPT = USS_ROOT / "metrics" / "clapscore" / "music_speech_audioset_epoch_15_esc_89.98.pt"
+DEFAULT_NUM_TARS = 5
+DEFAULT_METRIC_DURATION = 4.0
 
 if str(USS_ROOT) not in sys.path:
     sys.path.insert(0, str(USS_ROOT))
@@ -34,6 +36,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config_yaml", type=str, default=str(DEFAULT_CONFIG))
     parser.add_argument("--tar_path", type=str, default=None)
+    parser.add_argument("--num_tars", type=int, default=DEFAULT_NUM_TARS)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch_size", type=int, default=32)
@@ -65,14 +68,18 @@ def collect_val_tars(configs):
     return tar_paths
 
 
-def choose_tar(configs, tar_path: str | None, seed: int):
+def choose_tars(configs, tar_path: str | None, seed: int, num_tars: int):
     if tar_path is not None:
-        path = Path(tar_path)
-        if not path.exists():
-            raise FileNotFoundError(f"tar_path does not exist: {path}")
-        return path
+        paths = [Path(p.strip()) for p in tar_path.split(",") if p.strip()]
+        if not paths:
+            raise ValueError("tar_path is empty")
+        for path in paths:
+            if not path.exists():
+                raise FileNotFoundError(f"tar_path does not exist: {path}")
+        return paths
+    tar_paths = collect_val_tars(configs)
     rng = random.Random(seed)
-    return rng.choice(collect_val_tars(configs))
+    return rng.sample(tar_paths, min(num_tars, len(tar_paths)))
 
 
 def load_audio_bytes(audio_bytes: bytes):
@@ -109,6 +116,26 @@ def load_s1_from_tar(tar_path: Path):
     if not waveforms:
         raise RuntimeError(f"No valid s1 samples found in tar: {tar_path}")
     return waveforms, sample_rates, sample_keys, skipped
+
+
+def load_s1_from_tars(tar_paths):
+    all_waveforms = []
+    all_sample_rates = []
+    all_sample_keys = []
+    per_tar = []
+    skipped_total = 0
+    for tar_path in tar_paths:
+        waveforms, sample_rates, sample_keys, skipped = load_s1_from_tar(tar_path)
+        all_waveforms.extend(waveforms)
+        all_sample_rates.extend(sample_rates)
+        all_sample_keys.extend(sample_keys)
+        skipped_total += skipped
+        per_tar.append({
+            "tar_path": str(tar_path.resolve()),
+            "sample_count": len(waveforms),
+            "skipped_count": int(skipped),
+        })
+    return all_waveforms, all_sample_rates, all_sample_keys, skipped_total, per_tar
 
 
 def summarize_dataset(waveforms, sample_rates):
@@ -222,6 +249,9 @@ def summarize_values(values):
     if len(values) == 0:
         return None
     arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
     return {
         "mean": float(arr.mean()),
         "std": float(arr.std()),
@@ -229,6 +259,14 @@ def summarize_values(values):
         "max": float(arr.max()),
         "count": int(arr.size),
     }
+
+
+def try_import_pesq():
+    try:
+        from pesq import pesq as pesq_fn
+        return pesq_fn, None
+    except Exception as e:
+        return None, str(e)
 
 
 def try_create_dnsmos_sessions():
@@ -262,6 +300,27 @@ def aggregate_dnsmos(storage, batch_metrics):
         storage[key].extend(values)
 
 
+def compute_pesq_batch(ref_wav: torch.Tensor, pred_wav: torch.Tensor, sr: int, pesq_fn):
+    values = []
+    for i in range(ref_wav.shape[0]):
+        ref = ref_wav[i]
+        pred = pred_wav[i]
+        if sr != 16000:
+            ref = torchaudio.functional.resample(ref.unsqueeze(0), sr, 16000).squeeze(0)
+            pred = torchaudio.functional.resample(pred.unsqueeze(0), sr, 16000).squeeze(0)
+        try:
+            values.append(float(pesq_fn(16000, ref.numpy().astype(np.float32), pred.numpy().astype(np.float32), "wb")))
+        except Exception:
+            values.append(float("nan"))
+    return values
+
+
+def crop_for_metrics(ref_wav: torch.Tensor, pred_wav: torch.Tensor, sr: int, metric_duration: float):
+    metric_len = int(sr * metric_duration)
+    target_len = min(ref_wav.shape[-1], pred_wav.shape[-1], metric_len)
+    return ref_wav[..., :target_len], pred_wav[..., :target_len]
+
+
 def instantiate_first_stage(configs, device: str):
     first_stage_config = configs["model"]["params"]["first_stage_config"]
     model = instantiate_from_config(first_stage_config).to(device).eval()
@@ -271,14 +330,16 @@ def instantiate_first_stage(configs, device: str):
 def main():
     args = parse_args()
     configs = load_config(args.config_yaml)
-    tar_path = choose_tar(configs, args.tar_path, args.seed)
-    waveforms, sample_rates, sample_keys, skipped = load_s1_from_tar(tar_path)
+    tar_paths = choose_tars(configs, args.tar_path, args.seed, args.num_tars)
+    waveforms, sample_rates, sample_keys, skipped, per_tar = load_s1_from_tars(tar_paths)
     dataset_summary = summarize_dataset(waveforms, sample_rates)
 
     codec = instantiate_first_stage(configs, args.device)
     target_sr = int(codec.data_sr)
     target_len = int(codec.max_samples)
     duration = target_len / target_sr
+    metric_duration = DEFAULT_METRIC_DURATION
+    metric_target_len = int(metric_duration * target_sr)
 
     panns_model = None
     panns_error = None
@@ -302,9 +363,11 @@ def main():
     else:
         clap_error = f"missing checkpoint: {clap_ckpt}"
 
+    pesq_fn, pesq_error = try_import_pesq()
     dnsmos_primary, dnsmos_p808, dnsmos_error = try_create_dnsmos_sessions()
 
     si_sdr_values = []
+    pesq_values = []
     clap_audio_cosine = []
     fad_ref_embs = []
     fad_recon_embs = []
@@ -322,11 +385,11 @@ def main():
             recon = codec.decode(codec.encode(ref))
         ref_t = ref.detach().cpu().float().squeeze(1)
         recon_t = recon.detach().cpu().float().squeeze(1)
-        min_len = min(ref_t.shape[-1], recon_t.shape[-1])
-        ref_t = ref_t[..., :min_len]
-        recon_t = recon_t[..., :min_len]
+        ref_t, recon_t = crop_for_metrics(ref_t, recon_t, target_sr, metric_duration)
 
         si_sdr_values.extend(si_sdr(recon_t, ref_t).tolist())
+        if pesq_fn is not None:
+            pesq_values.extend(compute_pesq_batch(ref_t, recon_t, target_sr, pesq_fn))
 
         if panns_model is not None:
             fad_ref_embs.append(panns_embedding(panns_model, ref_t, target_sr, args.device))
@@ -354,22 +417,27 @@ def main():
 
     summary = {
         "config_yaml": str(Path(args.config_yaml).resolve()),
-        "tar_path": str(tar_path.resolve()),
+        "tar_paths": [str(path.resolve()) for path in tar_paths],
+        "tar_count": len(tar_paths),
         "seed": int(args.seed),
         "sample_count": len(waveforms),
         "skipped_count": int(skipped),
+        "per_tar": per_tar,
         "dataset_summary": dataset_summary,
         "codec": {
             "data_sr": target_sr,
             "codec_sr": int(codec.codec_sr),
             "target_len": target_len,
             "duration": float(duration),
+            "metric_target_len": metric_target_len,
+            "metric_duration": float(metric_duration),
             "reshape_channels": int(codec.reshape_channels),
             "freq_dim": int(codec.freq_dim),
             "feature_dim": int(codec.feature_dim),
         },
         "metrics": {
             "si_sdr": summarize_values(si_sdr_values),
+            "pesq_wb_16k": summarize_values(pesq_values),
             "fad": fad_value,
             "clap_audio_cosine": summarize_values(clap_audio_cosine),
             "dnsmos_ref": {key: summarize_values(values) for key, values in dnsmos_ref.items()} if len(dnsmos_ref["sig"]) > 0 else None,
@@ -377,11 +445,13 @@ def main():
             "dnsmos_delta_recon_minus_ref": dnsmos_delta,
         },
         "metric_availability": {
+            "pesq_wb_16k": pesq_fn is not None,
             "panns_fad": panns_model is not None,
             "clap_audio": clap_model is not None,
             "dnsmos": dnsmos_primary is not None and dnsmos_p808 is not None,
         },
         "metric_errors": {
+            "pesq_wb_16k": pesq_error,
             "panns_fad": panns_error,
             "clap_audio": clap_error,
             "dnsmos": dnsmos_error,
@@ -390,20 +460,25 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"codec_metrics_{tar_path.stem}.json"
+    output_path = output_dir / f"codec_metrics_{len(tar_paths)}tars_seed{args.seed}.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    print(f"tar_path: {tar_path}")
+    print(f"tar_count: {len(tar_paths)}")
     print(f"sample_count: {len(waveforms)}")
     print(f"codec_target_sr: {target_sr}")
     print(f"codec_duration: {duration:.4f}")
+    print(f"metric_duration: {metric_duration:.4f}")
     if summary["metrics"]["si_sdr"] is not None:
         print(f"si_sdr_mean: {summary['metrics']['si_sdr']['mean']:.4f}")
+    if summary["metrics"]["pesq_wb_16k"] is not None:
+        print(f"pesq_wb_16k_mean: {summary['metrics']['pesq_wb_16k']['mean']:.4f}")
     if fad_value is not None:
         print(f"fad: {fad_value:.6f}")
     if summary["metrics"]["clap_audio_cosine"] is not None:
         print(f"clap_audio_cosine_mean: {summary['metrics']['clap_audio_cosine']['mean']:.6f}")
+    if summary["metrics"]["dnsmos_recon"] is not None:
+        print(f"dnsmos_ovr_mean: {summary['metrics']['dnsmos_recon']['ovr']['mean']:.4f}")
     print(f"output_json: {output_path}")
 
 
