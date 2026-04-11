@@ -64,7 +64,7 @@ model:
     parameterization: eps
     first_stage_key: waveform
     latent_t_size: 104
-    latent_f_size: 128
+    latent_f_size: 16
     channels: 8
     extra_channels: true
     extra_channel_key: mixed_waveform

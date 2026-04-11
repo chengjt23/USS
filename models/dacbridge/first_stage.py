@@ -45,7 +45,12 @@ class DACVAEFirstStage(nn.Module):
         self.codec_sr = sample_rate
         self.data_sr = data_sample_rate
         self.reshape_channels = reshape_channels
-        self.freq_dim = latent_dim // reshape_channels
+        self.feature_dim = codebook_dim
+        if self.feature_dim % self.reshape_channels != 0:
+            raise ValueError(
+                f"DACVAE feature_dim={self.feature_dim} is not divisible by reshape_channels={self.reshape_channels}"
+            )
+        self.freq_dim = self.feature_dim // self.reshape_channels
         self.max_samples = int(duration * data_sample_rate)
         if pretrained_dir is not None:
             self._load_ckpt(os.path.join(pretrained_dir, "checkpoint.pt"))
@@ -103,10 +108,25 @@ class DACVAEFirstStage(nn.Module):
             z = self.encoder(self._pad(wav))
             mean, _ = self.quantizer.in_proj(z).chunk(2, dim=1)
         B, D, T = mean.shape
+        if D != self.feature_dim:
+            if D % self.reshape_channels != 0:
+                raise RuntimeError(
+                    f"Unexpected DACVAE feature dim {D}; reshape_channels={self.reshape_channels} cannot reshape it"
+                )
+            self.feature_dim = D
+            self.freq_dim = D // self.reshape_channels
         return mean.reshape(B, self.reshape_channels, self.freq_dim, T).permute(0, 1, 3, 2)
 
     def decode(self, z):
         B, C, T, F = z.shape
+        if C != self.reshape_channels:
+            raise RuntimeError(
+                f"Unexpected latent channel count {C}; expected reshape_channels={self.reshape_channels}"
+            )
+        if C * F != self.feature_dim:
+            raise RuntimeError(
+                f"Unexpected latent feature size {C * F}; expected {self.feature_dim}"
+            )
         latent = z.permute(0, 1, 3, 2).reshape(B, C * F, T)
         with torch.no_grad(), torch.backends.cudnn.flags(enabled=False):
             emb = self.quantizer.out_proj(latent)
