@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-lr5e-5-batchsize64"
+exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-lr5e-5-batchsize32"
 project: "USS"
 precision: "medium"
 
@@ -11,7 +11,7 @@ datamodule:
     val_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/val
     test_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/test
     sample_rate: 44100
-    batch_size: 64
+    batch_size: 32
     val_batch_size: 8
     val_tar_count: 8
     val_samples_per_tar: 500
