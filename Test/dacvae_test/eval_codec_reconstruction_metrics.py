@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import webdataset as wds
 import yaml
 from scipy import linalg
+from tqdm import tqdm
 
 SCRIPT_PATH = Path(__file__).resolve()
 SCRIPT_DIR = SCRIPT_PATH.parent
@@ -124,7 +125,7 @@ def load_s1_from_tars(tar_paths):
     all_sample_keys = []
     per_tar = []
     skipped_total = 0
-    for tar_path in tar_paths:
+    for tar_path in tqdm(tar_paths, desc="Loading tars", unit="tar", dynamic_ncols=True):
         waveforms, sample_rates, sample_keys, skipped = load_s1_from_tar(tar_path)
         all_waveforms.extend(waveforms)
         all_sample_rates.extend(sample_rates)
@@ -381,7 +382,12 @@ def main():
     dnsmos_ref = {"sig": [], "bak": [], "ovr": [], "p808_mos": []}
     dnsmos_recon = {"sig": [], "bak": [], "ovr": [], "p808_mos": []}
 
-    for start in range(0, len(waveforms), args.batch_size):
+    for start in tqdm(
+        range(0, len(waveforms), args.batch_size),
+        desc="Evaluating codec",
+        unit="batch",
+        dynamic_ncols=True,
+    ):
         batch_waveforms = waveforms[start:start + args.batch_size]
         batch_srs = sample_rates[start:start + args.batch_size]
         ref = torch.stack(
