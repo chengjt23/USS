@@ -100,14 +100,14 @@ def convert_wds_batch_to_model_format(batch, config, stft_tool):
         mix_audio_mono = mix_audio
 
     sampling_rate = config["preprocessing"]["audio"]["sampling_rate"]
-    hopsize = config["preprocessing"]["stft"]["hop_length"]
     duration = config["preprocessing"]["audio"]["duration"]
-    target_length = int(duration * sampling_rate / hopsize)
 
     log_mel_spec = None
     stft = None
     mixed_mel = None
     if required_audio_feature_keys:
+        hopsize = config["preprocessing"]["stft"]["hop_length"]
+        target_length = int(duration * sampling_rate / hopsize)
         target_log_mel_spec, target_stft = wav_feature_extraction(target_audio, stft_tool)
         if "fbank" in required_audio_feature_keys:
             log_mel_spec = pad_spec(target_log_mel_spec, target_length)
