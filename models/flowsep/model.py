@@ -458,20 +458,20 @@ class DDPM(pl.LightningModule):
         return loss
 
     def get_input(self, batch, k):
-        fname, text, label_indices, waveform, stft, fbank = (
-            batch["fname"],
-            batch["text"],
-            batch["label_vector"],
-            batch["waveform"],
-            batch["stft"],
-            batch["log_mel_spec"],
-        )
+        fname = batch["fname"]
+        text = batch["text"]
+        label_indices = batch["label_vector"]
+        waveform = batch["waveform"]
+        stft = batch.get("stft")
+        fbank = batch.get("log_mel_spec")
         ret = {}
 
-        ret["fbank"] = (
-            fbank.unsqueeze(1).to(memory_format=torch.contiguous_format).float()
-        )
-        ret["stft"] = stft.to(memory_format=torch.contiguous_format).float()
+        if fbank is not None:
+            ret["fbank"] = (
+                fbank.unsqueeze(1).to(memory_format=torch.contiguous_format).float()
+            )
+        if stft is not None:
+            ret["stft"] = stft.to(memory_format=torch.contiguous_format).float()
         ret["waveform"] = waveform.to(memory_format=torch.contiguous_format).float()
         ret["text"] = list(text)
         ret["fname"] = fname

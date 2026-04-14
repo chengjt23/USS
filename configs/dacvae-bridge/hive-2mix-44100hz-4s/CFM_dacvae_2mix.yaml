@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-lr3e-5-batchsize32"
+exp_name: "CFM_dacvae-2mix_hive-dacvae-44k-4s-lr3e-5-batchsize32"
 project: "USS"
 precision: "medium"
 
@@ -74,13 +74,6 @@ model:
     retrival_num: 0
     use_clap: false
     euler: true
-    bridge_mode: true
-    sb_schedule: true
-    sb_rho: 1.0
-    chen_bridge: true
-    chen_sampler_type: "sde"
-    data_prediction: true
-    use_ei_solver: true
     unet_config:
       target: models.flowsep.unet.UNetModel
       params:

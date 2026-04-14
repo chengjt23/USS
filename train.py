@@ -50,6 +50,12 @@ def build_stft_tool(config):
     )
 
 
+def get_required_audio_feature_keys(config):
+    model_params = config.get("model", {}).get("params", {})
+    keys = {model_params.get("first_stage_key"), model_params.get("extra_channel_key")}
+    return {k for k in keys if k in {"fbank", "stft", "mixed_mel"}}
+
+
 def wav_feature_extraction(waveform, stft_tool):
     if waveform.dim() == 3:
         waveform = waveform.squeeze(1)
@@ -79,6 +85,7 @@ def convert_wds_batch_to_model_format(batch, config, stft_tool):
     labels = batch["labels"]
     batch_size = mix_audio.shape[0]
     sample_metadata = batch.get("metadata", [{} for _ in range(batch_size)])
+    required_audio_feature_keys = get_required_audio_feature_keys(config)
 
     if sources_audio.ndim == 4 and sources_audio.shape[1] > 0:
         target_audio = sources_audio[:, 0, :, :]
@@ -97,12 +104,18 @@ def convert_wds_batch_to_model_format(batch, config, stft_tool):
     duration = config["preprocessing"]["audio"]["duration"]
     target_length = int(duration * sampling_rate / hopsize)
 
-    log_mel_spec, stft = wav_feature_extraction(target_audio, stft_tool)
-    log_mel_spec = pad_spec(log_mel_spec, target_length)
-    stft = pad_spec(stft, target_length)
-
-    mixed_mel, _ = wav_feature_extraction(mix_audio_mono, stft_tool)
-    mixed_mel = pad_spec(mixed_mel, target_length)
+    log_mel_spec = None
+    stft = None
+    mixed_mel = None
+    if required_audio_feature_keys:
+        target_log_mel_spec, target_stft = wav_feature_extraction(target_audio, stft_tool)
+        if "fbank" in required_audio_feature_keys:
+            log_mel_spec = pad_spec(target_log_mel_spec, target_length)
+        if "stft" in required_audio_feature_keys:
+            stft = pad_spec(target_stft, target_length)
+        if "mixed_mel" in required_audio_feature_keys:
+            mixed_mel, _ = wav_feature_extraction(mix_audio_mono, stft_tool)
+            mixed_mel = pad_spec(mixed_mel, target_length)
 
     text_list = []
     for i in range(batch_size):
@@ -214,7 +227,8 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
         val_batch_size = data_config.get("val_batch_size", data_config.get("batch_size", 1))
         val_progress_total = math.ceil(local_tar_count * val_samples_per_tar / val_batch_size)
 
-    stft_tool = build_stft_tool(configs)
+    required_audio_feature_keys = get_required_audio_feature_keys(configs)
+    stft_tool = build_stft_tool(configs) if required_audio_feature_keys else None
     loader = WrappedDataLoader(train_loader, configs, stft_tool)
     val_loader = WrappedDataLoader(val_loader, configs, stft_tool, explicit_length=val_progress_total)
     config_reload_from_ckpt = configs.get("reload_from_ckpt")
