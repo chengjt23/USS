@@ -327,6 +327,13 @@ def instantiate_first_stage(configs, device: str):
     return model
 
 
+def maybe_int_attr(obj, name: str):
+    value = getattr(obj, name, None)
+    if value is None:
+        return None
+    return int(value)
+
+
 def main():
     args = parse_args()
     configs = load_config(args.config_yaml)
@@ -431,8 +438,8 @@ def main():
             "duration": float(duration),
             "metric_target_len": metric_target_len,
             "metric_duration": float(metric_duration),
-            "reshape_channels": int(codec.reshape_channels),
-            "freq_dim": int(codec.freq_dim),
+            "reshape_channels": maybe_int_attr(codec, "reshape_channels"),
+            "freq_dim": maybe_int_attr(codec, "freq_dim"),
             "feature_dim": int(codec.feature_dim),
         },
         "metrics": {
