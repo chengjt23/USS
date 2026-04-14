@@ -1,0 +1,85 @@
+log_directory: "model_logs"
+exp_group: "uss"
+exp_name: "CFM_dacvae-2mix_hive-dacvae-44k-4s-seqdit1d-lr3e-5-cosdecay3e-6-batchsize16"
+precision: "medium"
+
+datamodule:
+  data_name: WDSDataModule
+  data_config:
+    train_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/train
+    val_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/val
+    test_dir: /gpfs/hulab/public_datasets/audio_datasets/USS-Qwen/mix/curationed_data/test
+    sample_rate: 44100
+    batch_size: 16
+    val_batch_size: 16
+    val_tar_count: 8
+    val_samples_per_tar: 500
+    num_workers: 8
+    shuffle_buffer: 1000
+    drop_last: false
+    persistent_workers: true
+    mix_selected: [2mix]
+
+step:
+  save_checkpoint_every_n_steps: 10000
+  max_steps: 200000
+  save_top_k: 4
+  limit_train_batches: 1000
+
+preprocessing:
+  audio:
+    sampling_rate: 44100
+    max_wav_value: 32768.0
+    duration: 4.16
+
+model:
+  target: models.dacbridge_seq.model.LatentDiffusionDACVAE1D
+  params:
+    base_learning_rate: 5.0e-05
+    lr_warmup_steps: 5000
+    lr_max: 3.0e-05
+    lr_min: 3.0e-06
+    lr_decay_until_step: 50000
+    sampling_rate: 44100
+    batchsize: 32
+    linear_start: 0.0015
+    linear_end: 0.0195
+    timesteps: 1000
+    unconditional_prob_cfg: 0.1
+    first_stage_key: waveform
+    latent_t_size: 104
+    channels: 128
+    extra_channels: true
+    extra_channel_key: mixed_waveform
+    scale_by_std: true
+    sigma_min: 1.0e-04
+    backbone_config:
+      target: models.dacbridge_seq.dit.DiT1D
+      params:
+        in_channels: 256
+        out_channels: 256
+        model_channels: 512
+        num_layers: 8
+        num_heads: 8
+        context_dim: 1024
+        mlp_ratio: 4.0
+        max_length: 104
+        dropout: 0.0
+    first_stage_config:
+      target: models.dacbridge_seq.first_stage.DACVAEFirstStage1D
+      params:
+        data_sample_rate: 44100
+        duration: 4.16
+        pretrained_model_name_or_path: facebook/sam-audio-large
+    cond_stage_config:
+      crossattn_text:
+        cond_stage_key: caption
+        conditioning_key: crossattn
+        target: models.flowsep.text_encoder.FlanT5HiddenState
+        params:
+          emb_num: 1
+          input_caption: true
+    evaluation_params:
+      unconditional_guidance_scale: 1.0
+      ddim_sampling_steps: 10
+      n_candidates_per_samples: 1
