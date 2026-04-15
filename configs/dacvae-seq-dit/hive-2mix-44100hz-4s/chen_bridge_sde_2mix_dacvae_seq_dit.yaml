@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-seqdit1d-lr1e-5-cosdecay1e-6-batchsize16"
+exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-seqdit1d-lr5e-6-cosdecay5e-7-batchsize16"
 precision: "medium"
 
 datamodule:
