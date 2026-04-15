@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "CFM_dacvae-2mix_hive-dacvae-44k-4s-seqdit1d-lr3e-5-cosdecay3e-6-batchsize16"
+exp_name: "CFM_dacvae-2mix_hive-dacvae-44k-4s-seqdit1d-lr5e-6-cosdecay5e-7-batchsize16"
 precision: "medium"
 
 datamodule:
@@ -37,8 +37,8 @@ model:
   params:
     base_learning_rate: 5.0e-05
     lr_warmup_steps: 5000
-    lr_max: 3.0e-05
-    lr_min: 3.0e-06
+    lr_max: 5.0e-06
+    lr_min: 5.0e-07
     lr_decay_until_step: 50000
     sampling_rate: 44100
     batchsize: 32
