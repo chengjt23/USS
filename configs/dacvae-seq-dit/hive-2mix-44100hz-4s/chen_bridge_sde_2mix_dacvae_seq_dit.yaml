@@ -37,8 +37,8 @@ model:
   params:
     base_learning_rate: 5.0e-05
     lr_warmup_steps: 5000
-    lr_max: 1.0e-05
-    lr_min: 1.0e-06
+    lr_max: 5.0e-06
+    lr_min: 5.0e-07
     lr_decay_until_step: 50000
     sampling_rate: 44100
     batchsize: 32
