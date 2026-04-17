@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-seqdit1d-lr1e-6-cosdecay1e-7-batchsize16"
+exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-seqdit1d-lr3e-6-cosdecay3e-7-batchsize16"
 precision: "medium"
 
 datamodule:
@@ -37,8 +37,8 @@ model:
   params:
     base_learning_rate: 5.0e-05
     lr_warmup_steps: 5000
-    lr_max: 1.0e-06
-    lr_min: 1.0e-07
+    lr_max: 3.0e-06
+    lr_min: 3.0e-07
     lr_decay_until_step: 50000
     sampling_rate: 44100
     batchsize: 32
