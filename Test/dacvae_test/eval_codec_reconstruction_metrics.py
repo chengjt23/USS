@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import io
 import json
@@ -26,6 +27,9 @@ DEFAULT_PANNS_CKPT = WORKSPACE_ROOT / "Cnn14_16k_mAP=0.438.pth"
 DEFAULT_CLAP_CKPT = USS_ROOT / "metrics" / "clapscore" / "music_speech_audioset_epoch_15_esc_89.98.pt"
 DEFAULT_NUM_TARS = 5
 DEFAULT_METRIC_DURATION = 4.0
+DEFAULT_PESQ_WORKERS = 4
+
+_RESAMPLER_CACHE = {}
 
 if str(USS_ROOT) not in sys.path:
     sys.path.insert(0, str(USS_ROOT))
@@ -44,6 +48,8 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--panns_ckpt_path", type=str, default=str(DEFAULT_PANNS_CKPT))
     parser.add_argument("--clap_ckpt_path", type=str, default=str(DEFAULT_CLAP_CKPT))
+    parser.add_argument("--pesq_workers", type=int, default=DEFAULT_PESQ_WORKERS)
+    parser.add_argument("--skip_dnsmos", action="store_true")
     return parser.parse_args()
 
 
@@ -163,15 +169,43 @@ def summarize_dataset(waveforms, sample_rates):
     }
 
 
+def resample_audio(wav: torch.Tensor, src_sr: int, dst_sr: int):
+    if src_sr == dst_sr:
+        return wav
+    key = (int(src_sr), int(dst_sr), str(wav.device))
+    resampler = _RESAMPLER_CACHE.get(key)
+    if resampler is None:
+        resampler = torchaudio.transforms.Resample(orig_freq=src_sr, new_freq=dst_sr).to(wav.device)
+        _RESAMPLER_CACHE[key] = resampler
+    return resampler(wav.float())
+
+
 def preprocess_waveform(wav: torch.Tensor, src_sr: int, dst_sr: int, target_len: int):
     wav = wav.reshape(-1)
     if src_sr != dst_sr:
-        wav = torchaudio.functional.resample(wav.unsqueeze(0), src_sr, dst_sr).squeeze(0)
+        wav = resample_audio(wav.unsqueeze(0), src_sr, dst_sr).squeeze(0)
     if wav.numel() > target_len:
         wav = wav[:target_len]
     elif wav.numel() < target_len:
         wav = F.pad(wav, (0, target_len - wav.numel()))
     return wav.unsqueeze(0)
+
+
+def preprocess_waveforms_batch(waveforms, sample_rates, dst_sr: int, target_len: int):
+    if not waveforms:
+        return torch.empty(0, 1, target_len)
+    if len(set(sample_rates)) == 1 and len({wav.numel() for wav in waveforms}) == 1:
+        batch = torch.stack([wav.reshape(-1) for wav in waveforms], dim=0)
+        batch = resample_audio(batch, sample_rates[0], dst_sr)
+        if batch.shape[-1] > target_len:
+            batch = batch[..., :target_len]
+        elif batch.shape[-1] < target_len:
+            batch = F.pad(batch, (0, target_len - batch.shape[-1]))
+        return batch.unsqueeze(1)
+    return torch.stack(
+        [preprocess_waveform(wav, sr, dst_sr, target_len) for wav, sr in zip(waveforms, sample_rates)],
+        dim=0,
+    )
 
 
 def load_module(module_name: str, file_path: Path):
@@ -216,7 +250,7 @@ def load_clap_model(checkpoint_path: Path, device: str):
 
 def panns_embedding(model, wav, sr, device):
     if sr != 16000:
-        wav = torchaudio.functional.resample(wav, sr, 16000)
+        wav = resample_audio(wav, sr, 16000)
     with torch.no_grad():
         out = model(wav.float().to(device), None)
     return out["embedding"].float().cpu()
@@ -224,7 +258,7 @@ def panns_embedding(model, wav, sr, device):
 
 def clap_audio_embedding(model, wav, sr, device):
     if sr != 32000:
-        wav = torchaudio.functional.resample(wav, sr, 32000)
+        wav = resample_audio(wav, sr, 32000)
     with torch.no_grad():
         embed = model.get_query_embed(modality="audio", audio=wav.float().to(device), device=device)
     return embed.float().cpu()
@@ -291,18 +325,53 @@ def try_create_dnsmos_sessions():
         return None, None, str(e)
 
 
+def _repeat_to_length(batch_np: np.ndarray, target_len: int):
+    if batch_np.shape[1] >= target_len:
+        return batch_np[:, :target_len]
+    repeat_count = (target_len + batch_np.shape[1] - 1) // batch_np.shape[1]
+    return np.tile(batch_np, (1, repeat_count))[:, :target_len]
+
+
 def compute_dnsmos_batch(batch_wav: torch.Tensor, sr: int, primary_sess, p808_sess):
-    from metrics.dnsmos.dnsmos_debug import compute_dnsmos
+    from metrics.dnsmos.dnsmos_debug import INPUT_LENGTH, SR, audio_melspec, compute_dnsmos, get_polyfit_val
+    if sr != SR:
+        batch_wav = resample_audio(batch_wav, sr, SR)
+        sr = SR
+    batch_np = batch_wav.cpu().numpy().astype(np.float32)
+    batch_np = _repeat_to_length(batch_np, int(INPUT_LENGTH * sr))
     metrics = {"sig": [], "bak": [], "ovr": [], "p808_mos": []}
-    for i in range(batch_wav.shape[0]):
-        wav = batch_wav[i]
-        if sr != 16000:
-            wav = torchaudio.functional.resample(wav.unsqueeze(0), sr, 16000).squeeze(0)
-        scores = compute_dnsmos(wav.numpy().astype(np.float32), primary_sess, p808_sess)
-        metrics["sig"].append(float(scores["SIG"]))
-        metrics["bak"].append(float(scores["BAK"]))
-        metrics["ovr"].append(float(scores["OVR"]))
-        metrics["p808_mos"].append(float(scores["P808_MOS"]))
+    primary_out = None
+    primary_input_name = primary_sess.get_inputs()[0].name
+    try:
+        primary_out = primary_sess.run(None, {primary_input_name: batch_np})[0]
+        if not isinstance(primary_out, np.ndarray) or primary_out.shape[0] != batch_np.shape[0]:
+            primary_out = None
+    except Exception:
+        primary_out = None
+    if primary_out is not None:
+        primary_scores = np.asarray([get_polyfit_val(row[0], row[1], row[2]) for row in primary_out], dtype=np.float32)
+        metrics["sig"].extend(primary_scores[:, 0].astype(np.float64).tolist())
+        metrics["bak"].extend(primary_scores[:, 1].astype(np.float64).tolist())
+        metrics["ovr"].extend(primary_scores[:, 2].astype(np.float64).tolist())
+    p808_input = np.stack([np.asarray(audio_melspec(audio=audio[:-160]), dtype=np.float32) for audio in batch_np], axis=0)
+    p808_out = None
+    p808_input_name = p808_sess.get_inputs()[0].name
+    try:
+        p808_out = p808_sess.run(None, {p808_input_name: p808_input})[0]
+        if not isinstance(p808_out, np.ndarray) or p808_out.shape[0] != batch_np.shape[0]:
+            p808_out = None
+    except Exception:
+        p808_out = None
+    if p808_out is not None:
+        metrics["p808_mos"].extend(np.asarray(p808_out).reshape(batch_np.shape[0], -1)[:, 0].astype(np.float64).tolist())
+    if primary_out is None or p808_out is None:
+        metrics = {"sig": [], "bak": [], "ovr": [], "p808_mos": []}
+        for i in range(batch_np.shape[0]):
+            scores = compute_dnsmos(batch_np[i], primary_sess, p808_sess, sr=sr)
+            metrics["sig"].append(float(scores["SIG"]))
+            metrics["bak"].append(float(scores["BAK"]))
+            metrics["ovr"].append(float(scores["OVR"]))
+            metrics["p808_mos"].append(float(scores["P808_MOS"]))
     return metrics
 
 
@@ -311,19 +380,24 @@ def aggregate_dnsmos(storage, batch_metrics):
         storage[key].extend(values)
 
 
-def compute_pesq_batch(ref_wav: torch.Tensor, pred_wav: torch.Tensor, sr: int, pesq_fn):
-    values = []
-    for i in range(ref_wav.shape[0]):
-        ref = ref_wav[i]
-        pred = pred_wav[i]
-        if sr != 16000:
-            ref = torchaudio.functional.resample(ref.unsqueeze(0), sr, 16000).squeeze(0)
-            pred = torchaudio.functional.resample(pred.unsqueeze(0), sr, 16000).squeeze(0)
-        try:
-            values.append(float(pesq_fn(16000, ref.numpy().astype(np.float32), pred.numpy().astype(np.float32), "wb")))
-        except Exception:
-            values.append(float("nan"))
-    return values
+def compute_single_pesq(item):
+    ref_np, pred_np, pesq_fn = item
+    try:
+        return float(pesq_fn(16000, ref_np, pred_np, "wb"))
+    except Exception:
+        return float("nan")
+
+
+def compute_pesq_batch(ref_wav: torch.Tensor, pred_wav: torch.Tensor, sr: int, pesq_fn, executor=None):
+    if sr != 16000:
+        ref_wav = resample_audio(ref_wav, sr, 16000)
+        pred_wav = resample_audio(pred_wav, sr, 16000)
+    ref_np = ref_wav.cpu().numpy().astype(np.float32)
+    pred_np = pred_wav.cpu().numpy().astype(np.float32)
+    items = [(ref_np[i], pred_np[i], pesq_fn) for i in range(ref_np.shape[0])]
+    if executor is None:
+        return [compute_single_pesq(item) for item in items]
+    return list(executor.map(compute_single_pesq, items))
 
 
 def crop_for_metrics(ref_wav: torch.Tensor, pred_wav: torch.Tensor, sr: int, metric_duration: float):
@@ -431,73 +505,91 @@ def main():
         clap_error = f"missing checkpoint: {clap_ckpt}"
 
     pesq_fn, pesq_error = try_import_pesq()
-    dnsmos_primary, dnsmos_p808, dnsmos_error = try_create_dnsmos_sessions()
+    pesq_executor = ThreadPoolExecutor(max_workers=max(1, args.pesq_workers)) if pesq_fn is not None and args.pesq_workers > 1 else None
+    dnsmos_primary = None
+    dnsmos_p808 = None
+    dnsmos_error = None
+    if args.skip_dnsmos:
+        dnsmos_error = "skipped by --skip_dnsmos"
+    else:
+        dnsmos_primary, dnsmos_p808, dnsmos_error = try_create_dnsmos_sessions()
 
     target_codec_metrics = init_metric_storage()
     mix_codec_metrics = init_metric_storage()
 
-    for start in tqdm(
-        range(0, len(target_waveforms), args.batch_size),
-        desc="Evaluating codec",
-        unit="batch",
-        dynamic_ncols=True,
-    ):
-        batch_target_waveforms = target_waveforms[start:start + args.batch_size]
-        batch_target_srs = target_sample_rates[start:start + args.batch_size]
-        batch_mix_waveforms = mix_waveforms[start:start + args.batch_size]
-        batch_mix_srs = mix_sample_rates[start:start + args.batch_size]
+    try:
+        for start in tqdm(
+            range(0, len(target_waveforms), args.batch_size),
+            desc="Evaluating codec",
+            unit="batch",
+            dynamic_ncols=True,
+        ):
+            batch_target_waveforms = target_waveforms[start:start + args.batch_size]
+            batch_target_srs = target_sample_rates[start:start + args.batch_size]
+            batch_mix_waveforms = mix_waveforms[start:start + args.batch_size]
+            batch_mix_srs = mix_sample_rates[start:start + args.batch_size]
 
-        ref = torch.stack(
-            [preprocess_waveform(wav, sr, target_sr, target_len) for wav, sr in zip(batch_target_waveforms, batch_target_srs)],
-            dim=0,
-        ).to(args.device)
-        mix = torch.stack(
-            [preprocess_waveform(wav, sr, target_sr, target_len) for wav, sr in zip(batch_mix_waveforms, batch_mix_srs)],
-            dim=0,
-        ).to(args.device)
+            ref = preprocess_waveforms_batch(batch_target_waveforms, batch_target_srs, target_sr, target_len).to(args.device)
+            mix = preprocess_waveforms_batch(batch_mix_waveforms, batch_mix_srs, target_sr, target_len).to(args.device)
 
-        with torch.no_grad():
-            recon = codec.decode(codec.encode(ref))
-            mix_recon = codec.decode(codec.encode(mix))
+            with torch.no_grad():
+                codec_input = torch.cat([ref, mix], dim=0)
+                codec_output = codec.decode(codec.encode(codec_input))
+                recon = codec_output[:ref.shape[0]]
+                mix_recon = codec_output[ref.shape[0]:]
 
-        ref_t = ref.detach().cpu().float().squeeze(1)
-        recon_t = recon.detach().cpu().float().squeeze(1)
-        mix_recon_t = mix_recon.detach().cpu().float().squeeze(1)
+            ref_t = ref.detach().cpu().float().squeeze(1)
+            recon_t = recon.detach().cpu().float().squeeze(1)
+            mix_recon_t = mix_recon.detach().cpu().float().squeeze(1)
 
-        ref_t_target, recon_t = crop_for_metrics(ref_t, recon_t, target_sr, metric_duration)
-        ref_t_mix, mix_recon_t = crop_for_metrics(ref_t, mix_recon_t, target_sr, metric_duration)
+            ref_t_target, recon_t = crop_for_metrics(ref_t, recon_t, target_sr, metric_duration)
+            ref_t_mix, mix_recon_t = crop_for_metrics(ref_t, mix_recon_t, target_sr, metric_duration)
 
-        target_codec_metrics["si_sdr"].extend(si_sdr(recon_t, ref_t_target).tolist())
-        mix_codec_metrics["si_sdr"].extend(si_sdr(mix_recon_t, ref_t_mix).tolist())
+            target_codec_metrics["si_sdr"].extend(si_sdr(recon_t, ref_t_target).tolist())
+            mix_codec_metrics["si_sdr"].extend(si_sdr(mix_recon_t, ref_t_mix).tolist())
 
-        if pesq_fn is not None:
-            target_codec_metrics["pesq_wb_16k"].extend(compute_pesq_batch(ref_t_target, recon_t, target_sr, pesq_fn))
-            mix_codec_metrics["pesq_wb_16k"].extend(compute_pesq_batch(ref_t_mix, mix_recon_t, target_sr, pesq_fn))
+            ref_16k = None
+            recon_16k = None
+            mix_recon_16k = None
+            if pesq_fn is not None or panns_model is not None or (dnsmos_primary is not None and dnsmos_p808 is not None):
+                ref_16k = resample_audio(ref_t_target, target_sr, 16000)
+                recon_16k = resample_audio(recon_t, target_sr, 16000)
+                mix_recon_16k = resample_audio(mix_recon_t, target_sr, 16000)
 
-        if panns_model is not None:
-            ref_emb = panns_embedding(panns_model, ref_t_target, target_sr, args.device)
-            recon_emb = panns_embedding(panns_model, recon_t, target_sr, args.device)
-            mix_recon_emb = panns_embedding(panns_model, mix_recon_t, target_sr, args.device)
-            target_codec_metrics["fad_ref_embs"].append(ref_emb)
-            mix_codec_metrics["fad_ref_embs"].append(ref_emb)
-            target_codec_metrics["fad_eval_embs"].append(recon_emb)
-            mix_codec_metrics["fad_eval_embs"].append(mix_recon_emb)
+            if pesq_fn is not None:
+                target_codec_metrics["pesq_wb_16k"].extend(compute_pesq_batch(ref_16k, recon_16k, 16000, pesq_fn, executor=pesq_executor))
+                mix_codec_metrics["pesq_wb_16k"].extend(compute_pesq_batch(ref_16k, mix_recon_16k, 16000, pesq_fn, executor=pesq_executor))
 
-        if clap_model is not None:
-            ref_emb = clap_audio_embedding(clap_model, ref_t_target, target_sr, args.device)
-            recon_emb = clap_audio_embedding(clap_model, recon_t, target_sr, args.device)
-            mix_recon_emb = clap_audio_embedding(clap_model, mix_recon_t, target_sr, args.device)
-            target_codec_metrics["clap_audio_cosine"].extend(torch.sum(F.normalize(ref_emb, dim=1) * F.normalize(recon_emb, dim=1), dim=1).tolist())
-            mix_codec_metrics["clap_audio_cosine"].extend(torch.sum(F.normalize(ref_emb, dim=1) * F.normalize(mix_recon_emb, dim=1), dim=1).tolist())
+            if panns_model is not None:
+                ref_emb = panns_embedding(panns_model, ref_16k, 16000, args.device)
+                recon_emb = panns_embedding(panns_model, recon_16k, 16000, args.device)
+                mix_recon_emb = panns_embedding(panns_model, mix_recon_16k, 16000, args.device)
+                target_codec_metrics["fad_ref_embs"].append(ref_emb)
+                mix_codec_metrics["fad_ref_embs"].append(ref_emb)
+                target_codec_metrics["fad_eval_embs"].append(recon_emb)
+                mix_codec_metrics["fad_eval_embs"].append(mix_recon_emb)
 
-        if dnsmos_primary is not None and dnsmos_p808 is not None:
-            ref_dnsmos = compute_dnsmos_batch(ref_t_target, target_sr, dnsmos_primary, dnsmos_p808)
-            recon_dnsmos = compute_dnsmos_batch(recon_t, target_sr, dnsmos_primary, dnsmos_p808)
-            mix_recon_dnsmos = compute_dnsmos_batch(mix_recon_t, target_sr, dnsmos_primary, dnsmos_p808)
-            aggregate_dnsmos(target_codec_metrics["dnsmos_ref"], ref_dnsmos)
-            aggregate_dnsmos(mix_codec_metrics["dnsmos_ref"], ref_dnsmos)
-            aggregate_dnsmos(target_codec_metrics["dnsmos_eval"], recon_dnsmos)
-            aggregate_dnsmos(mix_codec_metrics["dnsmos_eval"], mix_recon_dnsmos)
+            if clap_model is not None:
+                ref_32k = resample_audio(ref_t_target, target_sr, 32000)
+                recon_32k = resample_audio(recon_t, target_sr, 32000)
+                mix_recon_32k = resample_audio(mix_recon_t, target_sr, 32000)
+                ref_emb = clap_audio_embedding(clap_model, ref_32k, 32000, args.device)
+                recon_emb = clap_audio_embedding(clap_model, recon_32k, 32000, args.device)
+                mix_recon_emb = clap_audio_embedding(clap_model, mix_recon_32k, 32000, args.device)
+                target_codec_metrics["clap_audio_cosine"].extend(torch.sum(F.normalize(ref_emb, dim=1) * F.normalize(recon_emb, dim=1), dim=1).tolist())
+                mix_codec_metrics["clap_audio_cosine"].extend(torch.sum(F.normalize(ref_emb, dim=1) * F.normalize(mix_recon_emb, dim=1), dim=1).tolist())
+
+            if dnsmos_primary is not None and dnsmos_p808 is not None:
+                ref_dnsmos = compute_dnsmos_batch(ref_16k, 16000, dnsmos_primary, dnsmos_p808)
+                recon_dnsmos = compute_dnsmos_batch(recon_16k, 16000, dnsmos_primary, dnsmos_p808)
+                mix_recon_dnsmos = compute_dnsmos_batch(mix_recon_16k, 16000, dnsmos_primary, dnsmos_p808)
+                aggregate_dnsmos(target_codec_metrics["dnsmos_ref"], ref_dnsmos)
+                aggregate_dnsmos(mix_codec_metrics["dnsmos_ref"], ref_dnsmos)
+                aggregate_dnsmos(target_codec_metrics["dnsmos_eval"], recon_dnsmos)
+                aggregate_dnsmos(mix_codec_metrics["dnsmos_eval"], mix_recon_dnsmos)
+    finally:
+        if pesq_executor is not None:
+            pesq_executor.shutdown(wait=True)
 
     target_codec_summary = finalize_metric_storage(target_codec_metrics)
     mix_codec_summary = finalize_metric_storage(mix_codec_metrics)
