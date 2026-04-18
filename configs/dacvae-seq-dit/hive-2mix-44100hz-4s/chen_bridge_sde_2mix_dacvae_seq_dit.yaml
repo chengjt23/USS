@@ -1,6 +1,6 @@
 log_directory: "model_logs"
 exp_group: "uss"
-exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-seqdit1d-lr3e-6-cosdecay3e-7-batchsize16"
+exp_name: "chen_bridge_sde-2mix_hive-dacvae-44k-4s-seqdit1d--lr1e-5-cosdecay1e-6-batchsize16"
 precision: "medium"
 
 datamodule:
@@ -35,13 +35,13 @@ preprocessing:
 model:
   target: models.dacbridge_seq.model.LatentDiffusionDACVAE1D
   params:
-    base_learning_rate: 5.0e-05
-    lr_warmup_steps: 5000
-    lr_max: 3.0e-06
-    lr_min: 3.0e-07
-    lr_decay_until_step: 50000
+    base_learning_rate: 1.0e-05
+    lr_warmup_steps: 10000
+    lr_max: 1.0e-05
+    lr_min: 1.0e-06
+    lr_decay_until_step: 150000
     sampling_rate: 44100
-    batchsize: 32
+    batchsize: 16
     linear_start: 0.0015
     linear_end: 0.0195
     timesteps: 1000
@@ -65,13 +65,28 @@ model:
       params:
         in_channels: 256
         out_channels: 256
-        model_channels: 512
-        num_layers: 8
-        num_heads: 8
+        model_channels: 2048
+        num_layers: 16
+        num_heads: 16
         context_dim: 1024
-        mlp_ratio: 4.0
         max_length: 104
-        dropout: 0.0
+        dropout: 0.1
+        norm_eps: 1.0e-05
+        qk_norm: true
+        fc_bias: false
+        ffn_exp: 4
+        ffn_dim_multiplier: 1
+        multiple_of: 64
+        non_linearity: swiglu
+        use_rope: true
+        frequency_embedding_dim: 256
+        timestep_non_linearity: swiglu
+        t_block_non_linearity: silu
+        t_block_bias: true
+        context_non_linearity: swiglu
+        context_embedder_dropout: 0.0
+        context_norm: false
+        patch_size: 1
     first_stage_config:
       target: models.dacbridge_seq.first_stage.DACVAEFirstStage1D
       params:
@@ -88,5 +103,5 @@ model:
           input_caption: true
     evaluation_params:
       unconditional_guidance_scale: 1.0
-      ddim_sampling_steps: 10
+      ddim_sampling_steps: 50
       n_candidates_per_samples: 1
