@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 import math
 from functools import partial
 
@@ -553,6 +554,7 @@ class DiT1D(nn.Module):
         context_embedder_dropout=0.0,
         context_norm=False,
         patch_size=1,
+        gradient_checkpointing=False,
     ):
         super().__init__()
         del time_embed_dim
@@ -566,6 +568,7 @@ class DiT1D(nn.Module):
         self.model_channels = model_channels
         self.max_length = max_length
         self.dropout = dropout
+        self.gradient_checkpointing = gradient_checkpointing
         self.data_proj = nn.Linear(in_channels, model_channels, bias=fc_bias)
         self.x_embedder = Patcher(
             in_channels=model_channels,
@@ -649,6 +652,15 @@ class DiT1D(nn.Module):
         mask = torch.cat(masks, dim=1) if len(masks) > 1 else masks[0]
         return context, mask
 
+    def _forward_block(self, block, h, t_block, memory, mask):
+        return block(
+            x=h,
+            t=t_block,
+            cross_x=memory,
+            memory_padding_mask=mask,
+            rope=self.rope_embeddings,
+        )
+
     def forward(self, x, timesteps, context_list=None, y=None, context_attn_mask_list=None):
         del y
         if x.dim() != 3:
@@ -664,12 +676,23 @@ class DiT1D(nn.Module):
         if memory is not None:
             memory = memory + self.memory_timestep_embed(timesteps, pos=timesteps).to(memory).unsqueeze(1)
         for block in self.blocks:
-            h = block(
-                x=h,
-                t=t_block,
-                cross_x=memory,
-                memory_padding_mask=mask,
-                rope=self.rope_embeddings,
-            )
+            if self.training and self.gradient_checkpointing:
+                if memory is None:
+                    h = checkpoint(
+                        lambda h_, t_: self._forward_block(block, h_, t_, None, mask),
+                        h,
+                        t_block,
+                        use_reentrant=False,
+                    )
+                else:
+                    h = checkpoint(
+                        lambda h_, t_, memory_: self._forward_block(block, h_, t_, memory_, mask),
+                        h,
+                        t_block,
+                        memory,
+                        use_reentrant=False,
+                    )
+            else:
+                h = self._forward_block(block, h, t_block, memory, mask)
         out = self.final_layer(h, t_emb)
         return out.transpose(1, 2)

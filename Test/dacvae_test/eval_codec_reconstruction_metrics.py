@@ -92,13 +92,15 @@ def load_audio_bytes(audio_bytes: bytes):
     return tensor, int(sr)
 
 
-def load_s1_from_tar(tar_path: Path):
+def load_target_and_mix_from_tar(tar_path: Path):
     dataset = wds.DataPipeline(
         wds.SimpleShardList([str(tar_path)]),
         wds.tarfile_to_samples(handler=wds.warn_and_continue),
     )
-    waveforms = []
-    sample_rates = []
+    target_waveforms = []
+    target_sample_rates = []
+    mix_waveforms = []
+    mix_sample_rates = []
     sample_keys = []
     skipped = 0
     for sample in dataset:
@@ -106,37 +108,45 @@ def load_s1_from_tar(tar_path: Path):
             k for k in sample.keys()
             if isinstance(k, str) and k.startswith("s") and k.endswith(".wav")
         )
-        s1_key = "s1.wav" if "s1.wav" in sample else (source_keys[1] if len(source_keys) > 1 else None)
-        if s1_key is None:
+        target_key = "s1.wav" if "s1.wav" in sample else (source_keys[1] if len(source_keys) > 1 else None)
+        mix_key = "mix.wav" if "mix.wav" in sample else None
+        if target_key is None or mix_key is None:
             skipped += 1
             continue
-        wav, sr = load_audio_bytes(sample[s1_key])
-        waveforms.append(wav)
-        sample_rates.append(sr)
+        target_wav, target_sr = load_audio_bytes(sample[target_key])
+        mix_wav, mix_sr = load_audio_bytes(sample[mix_key])
+        target_waveforms.append(target_wav)
+        target_sample_rates.append(target_sr)
+        mix_waveforms.append(mix_wav)
+        mix_sample_rates.append(mix_sr)
         sample_keys.append(sample.get("__key__", str(len(sample_keys))))
-    if not waveforms:
-        raise RuntimeError(f"No valid s1 samples found in tar: {tar_path}")
-    return waveforms, sample_rates, sample_keys, skipped
+    if not target_waveforms:
+        raise RuntimeError(f"No valid target and mix samples found in tar: {tar_path}")
+    return target_waveforms, target_sample_rates, mix_waveforms, mix_sample_rates, sample_keys, skipped
 
 
-def load_s1_from_tars(tar_paths):
-    all_waveforms = []
-    all_sample_rates = []
+def load_target_and_mix_from_tars(tar_paths):
+    all_target_waveforms = []
+    all_target_sample_rates = []
+    all_mix_waveforms = []
+    all_mix_sample_rates = []
     all_sample_keys = []
     per_tar = []
     skipped_total = 0
     for tar_path in tqdm(tar_paths, desc="Loading tars", unit="tar", dynamic_ncols=True):
-        waveforms, sample_rates, sample_keys, skipped = load_s1_from_tar(tar_path)
-        all_waveforms.extend(waveforms)
-        all_sample_rates.extend(sample_rates)
+        target_waveforms, target_sample_rates, mix_waveforms, mix_sample_rates, sample_keys, skipped = load_target_and_mix_from_tar(tar_path)
+        all_target_waveforms.extend(target_waveforms)
+        all_target_sample_rates.extend(target_sample_rates)
+        all_mix_waveforms.extend(mix_waveforms)
+        all_mix_sample_rates.extend(mix_sample_rates)
         all_sample_keys.extend(sample_keys)
         skipped_total += skipped
         per_tar.append({
             "tar_path": str(tar_path.resolve()),
-            "sample_count": len(waveforms),
+            "sample_count": len(target_waveforms),
             "skipped_count": int(skipped),
         })
-    return all_waveforms, all_sample_rates, all_sample_keys, skipped_total, per_tar
+    return all_target_waveforms, all_target_sample_rates, all_mix_waveforms, all_mix_sample_rates, all_sample_keys, skipped_total, per_tar
 
 
 def summarize_dataset(waveforms, sample_rates):
@@ -322,6 +332,54 @@ def crop_for_metrics(ref_wav: torch.Tensor, pred_wav: torch.Tensor, sr: int, met
     return ref_wav[..., :target_len], pred_wav[..., :target_len]
 
 
+def init_metric_storage():
+    return {
+        "si_sdr": [],
+        "pesq_wb_16k": [],
+        "clap_audio_cosine": [],
+        "fad_ref_embs": [],
+        "fad_eval_embs": [],
+        "dnsmos_ref": {"sig": [], "bak": [], "ovr": [], "p808_mos": []},
+        "dnsmos_eval": {"sig": [], "bak": [], "ovr": [], "p808_mos": []},
+    }
+
+
+def finalize_metric_storage(storage):
+    fad_value = None
+    if storage["fad_ref_embs"] and storage["fad_eval_embs"]:
+        fad_value = frechet_distance(torch.cat(storage["fad_ref_embs"], dim=0), torch.cat(storage["fad_eval_embs"], dim=0))
+
+    dnsmos_delta = None
+    if len(storage["dnsmos_ref"]["sig"]) > 0:
+        dnsmos_delta = {
+            key: summarize_values(np.asarray(storage["dnsmos_eval"][key]) - np.asarray(storage["dnsmos_ref"][key]))
+            for key in storage["dnsmos_ref"]
+        }
+
+    return {
+        "si_sdr": summarize_values(storage["si_sdr"]),
+        "pesq_wb_16k": summarize_values(storage["pesq_wb_16k"]),
+        "fad": fad_value,
+        "clap_audio_cosine": summarize_values(storage["clap_audio_cosine"]),
+        "dnsmos_ref": {key: summarize_values(values) for key, values in storage["dnsmos_ref"].items()} if len(storage["dnsmos_ref"]["sig"]) > 0 else None,
+        "dnsmos_eval": {key: summarize_values(values) for key, values in storage["dnsmos_eval"].items()} if len(storage["dnsmos_eval"]["sig"]) > 0 else None,
+        "dnsmos_delta_eval_minus_ref": dnsmos_delta,
+    }
+
+
+def print_metric_summary(prefix: str, metrics):
+    if metrics["si_sdr"] is not None:
+        print(f"{prefix}_si_sdr_mean: {metrics['si_sdr']['mean']:.4f}")
+    if metrics["pesq_wb_16k"] is not None:
+        print(f"{prefix}_pesq_wb_16k_mean: {metrics['pesq_wb_16k']['mean']:.4f}")
+    if metrics["fad"] is not None:
+        print(f"{prefix}_fad: {metrics['fad']:.6f}")
+    if metrics["clap_audio_cosine"] is not None:
+        print(f"{prefix}_clap_audio_cosine_mean: {metrics['clap_audio_cosine']['mean']:.6f}")
+    if metrics["dnsmos_eval"] is not None:
+        print(f"{prefix}_dnsmos_ovr_mean: {metrics['dnsmos_eval']['ovr']['mean']:.4f}")
+
+
 def instantiate_first_stage(configs, device: str):
     first_stage_config = configs["model"]["params"]["first_stage_config"]
     model = instantiate_from_config(first_stage_config).to(device).eval()
@@ -339,8 +397,9 @@ def main():
     args = parse_args()
     configs = load_config(args.config_yaml)
     tar_paths = choose_tars(configs, args.tar_path, args.seed, args.num_tars)
-    waveforms, sample_rates, sample_keys, skipped, per_tar = load_s1_from_tars(tar_paths)
-    dataset_summary = summarize_dataset(waveforms, sample_rates)
+    target_waveforms, target_sample_rates, mix_waveforms, mix_sample_rates, sample_keys, skipped, per_tar = load_target_and_mix_from_tars(tar_paths)
+    dataset_summary = summarize_dataset(target_waveforms, target_sample_rates)
+    mix_dataset_summary = summarize_dataset(mix_waveforms, mix_sample_rates)
 
     codec = instantiate_first_stage(configs, args.device)
     target_sr = int(codec.data_sr)
@@ -374,69 +433,85 @@ def main():
     pesq_fn, pesq_error = try_import_pesq()
     dnsmos_primary, dnsmos_p808, dnsmos_error = try_create_dnsmos_sessions()
 
-    si_sdr_values = []
-    pesq_values = []
-    clap_audio_cosine = []
-    fad_ref_embs = []
-    fad_recon_embs = []
-    dnsmos_ref = {"sig": [], "bak": [], "ovr": [], "p808_mos": []}
-    dnsmos_recon = {"sig": [], "bak": [], "ovr": [], "p808_mos": []}
+    target_codec_metrics = init_metric_storage()
+    mix_codec_metrics = init_metric_storage()
 
     for start in tqdm(
-        range(0, len(waveforms), args.batch_size),
+        range(0, len(target_waveforms), args.batch_size),
         desc="Evaluating codec",
         unit="batch",
         dynamic_ncols=True,
     ):
-        batch_waveforms = waveforms[start:start + args.batch_size]
-        batch_srs = sample_rates[start:start + args.batch_size]
+        batch_target_waveforms = target_waveforms[start:start + args.batch_size]
+        batch_target_srs = target_sample_rates[start:start + args.batch_size]
+        batch_mix_waveforms = mix_waveforms[start:start + args.batch_size]
+        batch_mix_srs = mix_sample_rates[start:start + args.batch_size]
+
         ref = torch.stack(
-            [preprocess_waveform(wav, sr, target_sr, target_len) for wav, sr in zip(batch_waveforms, batch_srs)],
+            [preprocess_waveform(wav, sr, target_sr, target_len) for wav, sr in zip(batch_target_waveforms, batch_target_srs)],
             dim=0,
         ).to(args.device)
+        mix = torch.stack(
+            [preprocess_waveform(wav, sr, target_sr, target_len) for wav, sr in zip(batch_mix_waveforms, batch_mix_srs)],
+            dim=0,
+        ).to(args.device)
+
         with torch.no_grad():
             recon = codec.decode(codec.encode(ref))
+            mix_recon = codec.decode(codec.encode(mix))
+
         ref_t = ref.detach().cpu().float().squeeze(1)
         recon_t = recon.detach().cpu().float().squeeze(1)
-        ref_t, recon_t = crop_for_metrics(ref_t, recon_t, target_sr, metric_duration)
+        mix_recon_t = mix_recon.detach().cpu().float().squeeze(1)
 
-        si_sdr_values.extend(si_sdr(recon_t, ref_t).tolist())
+        ref_t_target, recon_t = crop_for_metrics(ref_t, recon_t, target_sr, metric_duration)
+        ref_t_mix, mix_recon_t = crop_for_metrics(ref_t, mix_recon_t, target_sr, metric_duration)
+
+        target_codec_metrics["si_sdr"].extend(si_sdr(recon_t, ref_t_target).tolist())
+        mix_codec_metrics["si_sdr"].extend(si_sdr(mix_recon_t, ref_t_mix).tolist())
+
         if pesq_fn is not None:
-            pesq_values.extend(compute_pesq_batch(ref_t, recon_t, target_sr, pesq_fn))
+            target_codec_metrics["pesq_wb_16k"].extend(compute_pesq_batch(ref_t_target, recon_t, target_sr, pesq_fn))
+            mix_codec_metrics["pesq_wb_16k"].extend(compute_pesq_batch(ref_t_mix, mix_recon_t, target_sr, pesq_fn))
 
         if panns_model is not None:
-            fad_ref_embs.append(panns_embedding(panns_model, ref_t, target_sr, args.device))
-            fad_recon_embs.append(panns_embedding(panns_model, recon_t, target_sr, args.device))
+            ref_emb = panns_embedding(panns_model, ref_t_target, target_sr, args.device)
+            recon_emb = panns_embedding(panns_model, recon_t, target_sr, args.device)
+            mix_recon_emb = panns_embedding(panns_model, mix_recon_t, target_sr, args.device)
+            target_codec_metrics["fad_ref_embs"].append(ref_emb)
+            mix_codec_metrics["fad_ref_embs"].append(ref_emb)
+            target_codec_metrics["fad_eval_embs"].append(recon_emb)
+            mix_codec_metrics["fad_eval_embs"].append(mix_recon_emb)
 
         if clap_model is not None:
-            ref_emb = clap_audio_embedding(clap_model, ref_t, target_sr, args.device)
+            ref_emb = clap_audio_embedding(clap_model, ref_t_target, target_sr, args.device)
             recon_emb = clap_audio_embedding(clap_model, recon_t, target_sr, args.device)
-            clap_audio_cosine.extend(torch.sum(F.normalize(ref_emb, dim=1) * F.normalize(recon_emb, dim=1), dim=1).tolist())
+            mix_recon_emb = clap_audio_embedding(clap_model, mix_recon_t, target_sr, args.device)
+            target_codec_metrics["clap_audio_cosine"].extend(torch.sum(F.normalize(ref_emb, dim=1) * F.normalize(recon_emb, dim=1), dim=1).tolist())
+            mix_codec_metrics["clap_audio_cosine"].extend(torch.sum(F.normalize(ref_emb, dim=1) * F.normalize(mix_recon_emb, dim=1), dim=1).tolist())
 
         if dnsmos_primary is not None and dnsmos_p808 is not None:
-            aggregate_dnsmos(dnsmos_ref, compute_dnsmos_batch(ref_t, target_sr, dnsmos_primary, dnsmos_p808))
-            aggregate_dnsmos(dnsmos_recon, compute_dnsmos_batch(recon_t, target_sr, dnsmos_primary, dnsmos_p808))
+            ref_dnsmos = compute_dnsmos_batch(ref_t_target, target_sr, dnsmos_primary, dnsmos_p808)
+            recon_dnsmos = compute_dnsmos_batch(recon_t, target_sr, dnsmos_primary, dnsmos_p808)
+            mix_recon_dnsmos = compute_dnsmos_batch(mix_recon_t, target_sr, dnsmos_primary, dnsmos_p808)
+            aggregate_dnsmos(target_codec_metrics["dnsmos_ref"], ref_dnsmos)
+            aggregate_dnsmos(mix_codec_metrics["dnsmos_ref"], ref_dnsmos)
+            aggregate_dnsmos(target_codec_metrics["dnsmos_eval"], recon_dnsmos)
+            aggregate_dnsmos(mix_codec_metrics["dnsmos_eval"], mix_recon_dnsmos)
 
-    fad_value = None
-    if fad_ref_embs and fad_recon_embs:
-        fad_value = frechet_distance(torch.cat(fad_ref_embs, dim=0), torch.cat(fad_recon_embs, dim=0))
-
-    dnsmos_delta = None
-    if len(dnsmos_ref["sig"]) > 0:
-        dnsmos_delta = {
-            key: summarize_values(np.asarray(dnsmos_recon[key]) - np.asarray(dnsmos_ref[key]))
-            for key in dnsmos_ref
-        }
+    target_codec_summary = finalize_metric_storage(target_codec_metrics)
+    mix_codec_summary = finalize_metric_storage(mix_codec_metrics)
 
     summary = {
         "config_yaml": str(Path(args.config_yaml).resolve()),
         "tar_paths": [str(path.resolve()) for path in tar_paths],
         "tar_count": len(tar_paths),
         "seed": int(args.seed),
-        "sample_count": len(waveforms),
+        "sample_count": len(target_waveforms),
         "skipped_count": int(skipped),
         "per_tar": per_tar,
         "dataset_summary": dataset_summary,
+        "mix_dataset_summary": mix_dataset_summary,
         "codec": {
             "data_sr": target_sr,
             "codec_sr": int(codec.codec_sr),
@@ -449,13 +524,15 @@ def main():
             "feature_dim": int(codec.feature_dim),
         },
         "metrics": {
-            "si_sdr": summarize_values(si_sdr_values),
-            "pesq_wb_16k": summarize_values(pesq_values),
-            "fad": fad_value,
-            "clap_audio_cosine": summarize_values(clap_audio_cosine),
-            "dnsmos_ref": {key: summarize_values(values) for key, values in dnsmos_ref.items()} if len(dnsmos_ref["sig"]) > 0 else None,
-            "dnsmos_recon": {key: summarize_values(values) for key, values in dnsmos_recon.items()} if len(dnsmos_recon["sig"]) > 0 else None,
-            "dnsmos_delta_recon_minus_ref": dnsmos_delta,
+            "si_sdr": target_codec_summary["si_sdr"],
+            "pesq_wb_16k": target_codec_summary["pesq_wb_16k"],
+            "fad": target_codec_summary["fad"],
+            "clap_audio_cosine": target_codec_summary["clap_audio_cosine"],
+            "dnsmos_ref": target_codec_summary["dnsmos_ref"],
+            "dnsmos_recon": target_codec_summary["dnsmos_eval"],
+            "dnsmos_delta_recon_minus_ref": target_codec_summary["dnsmos_delta_eval_minus_ref"],
+            "target_codec_vs_target": target_codec_summary,
+            "mix_codec_vs_target": mix_codec_summary,
         },
         "metric_availability": {
             "pesq_wb_16k": pesq_fn is not None,
@@ -478,7 +555,7 @@ def main():
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     print(f"tar_count: {len(tar_paths)}")
-    print(f"sample_count: {len(waveforms)}")
+    print(f"sample_count: {len(target_waveforms)}")
     print(f"codec_target_sr: {target_sr}")
     print(f"codec_duration: {duration:.4f}")
     print(f"metric_duration: {metric_duration:.4f}")
@@ -486,12 +563,13 @@ def main():
         print(f"si_sdr_mean: {summary['metrics']['si_sdr']['mean']:.4f}")
     if summary["metrics"]["pesq_wb_16k"] is not None:
         print(f"pesq_wb_16k_mean: {summary['metrics']['pesq_wb_16k']['mean']:.4f}")
-    if fad_value is not None:
-        print(f"fad: {fad_value:.6f}")
+    if summary["metrics"]["fad"] is not None:
+        print(f"fad: {summary['metrics']['fad']:.6f}")
     if summary["metrics"]["clap_audio_cosine"] is not None:
         print(f"clap_audio_cosine_mean: {summary['metrics']['clap_audio_cosine']['mean']:.6f}")
     if summary["metrics"]["dnsmos_recon"] is not None:
         print(f"dnsmos_ovr_mean: {summary['metrics']['dnsmos_recon']['ovr']['mean']:.4f}")
+    print_metric_summary("mix_codec_vs_target", summary["metrics"]["mix_codec_vs_target"])
     print(f"output_json: {output_path}")
 
 
