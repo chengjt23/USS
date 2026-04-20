@@ -7,7 +7,6 @@ import argparse
 import yaml
 import torch
 import numpy as np
-import math
 import warnings
 import logging
 from pytorch_lightning import Trainer, seed_everything
@@ -209,28 +208,16 @@ def main(configs, config_yaml_path, exp_group_name, exp_name):
     log_path = configs["log_directory"]
     exp_group_name = configs["exp_group"]
     exp_name = configs["exp_name"]
-    batch_size = configs["model"]["params"]["batchsize"]
 
     datamodule = build_datamodule(configs)
     train_loader, val_loader, test_loader = datamodule.make_loader
     device_count = torch.cuda.device_count()
 
-    data_config = configs.get("datamodule", {}).get("data_config", {})
-    val_progress_total = None
-    val_tar_count = data_config.get("val_tar_count")
-    val_samples_per_tar = data_config.get("val_samples_per_tar")
-    if val_loader is not None and val_tar_count is not None and val_samples_per_tar is not None:
-        mix_selected = data_config.get("mix_selected")
-        selected_dir_count = len(mix_selected) if mix_selected is not None else 1
-        total_selected_tars = val_tar_count * selected_dir_count
-        local_tar_count = math.ceil(total_selected_tars / max(device_count, 1))
-        val_batch_size = data_config.get("val_batch_size", data_config.get("batch_size", 1))
-        val_progress_total = math.ceil(local_tar_count * val_samples_per_tar / val_batch_size)
-
     required_audio_feature_keys = get_required_audio_feature_keys(configs)
     stft_tool = build_stft_tool(configs) if required_audio_feature_keys else None
     loader = WrappedDataLoader(train_loader, configs, stft_tool)
-    val_loader = WrappedDataLoader(val_loader, configs, stft_tool, explicit_length=val_progress_total)
+    val_progress_total = getattr(val_loader, "explicit_length", None) if val_loader is not None else None
+    val_loader = WrappedDataLoader(val_loader, configs, stft_tool, explicit_length=val_progress_total) if val_loader is not None else None
     config_reload_from_ckpt = configs.get("reload_from_ckpt")
     limit_val_batches = configs.get("step", {}).get("limit_val_batches")
     limit_train_batches = configs.get("step", {}).get("limit_train_batches", 10000)

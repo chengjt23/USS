@@ -3,6 +3,7 @@ import io
 import json
 import glob
 import random
+import math
 from typing import List, Tuple
 
 import torch
@@ -10,6 +11,7 @@ import torchaudio
 import soundfile as sf
 import numpy as np
 import webdataset as wds
+import pytorch_lightning as pl
 
 
 def _load_wav_bytes(buf: bytes):
@@ -20,7 +22,52 @@ def _load_wav_bytes(buf: bytes):
     else:
         t = t.T
     return t, sr
-import pytorch_lightning as pl
+
+
+def _get_distributed_rank_world_size():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank(), torch.distributed.get_world_size()
+    try:
+        rank = int(os.environ.get("RANK", "0"))
+    except ValueError:
+        rank = 0
+    try:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    except ValueError:
+        world_size = 1
+    return rank, max(world_size, 1)
+
+
+def _select_validation_tar_paths(root_dir: str, mix_selected: list = None, val_tar_count: int = 2):
+    if mix_selected is not None:
+        selected_dirs = [os.path.join(root_dir, m) for m in mix_selected]
+    else:
+        selected_dirs = [root_dir]
+
+    tar_paths = []
+    rng = random.Random(42)
+    for d in selected_dirs:
+        subdirs = sorted([s for s in os.listdir(d) if os.path.isdir(os.path.join(d, s))]) if mix_selected is None else [d]
+        for subdir_path in (subdirs if mix_selected is None else [d]):
+            if mix_selected is None:
+                subdir_path = os.path.join(d, subdir_path)
+            tar_files = sorted(glob.glob(os.path.join(subdir_path, "*.tar")))
+            if len(tar_files) == 0:
+                continue
+            selected_tars = rng.sample(tar_files, min(val_tar_count, len(tar_files)))
+            tar_paths.extend(selected_tars)
+    return tar_paths
+
+
+def _get_local_validation_tar_paths(tar_paths: List[str]):
+    rank, world_size = _get_distributed_rank_world_size()
+    return tar_paths[rank::world_size]
+
+
+def _get_validation_explicit_length(local_tar_paths: List[str], batch_size: int, val_samples_per_tar: int = None):
+    if val_samples_per_tar is None:
+        return None
+    return math.ceil(len(local_tar_paths) * val_samples_per_tar / batch_size)
 
 
 def decode_sample_to_tensors(sample: dict, target_sr: int):
@@ -141,26 +188,19 @@ def create_wds_dataloader(
     mix_selected: list = None,
     data_ratio: float = 1.0,
     val_tar_count: int = 2,
+    val_samples_per_tar: int = None,
 ):
-    if mix_selected is not None:
-        selected_dirs = [os.path.join(root_dir, m) for m in mix_selected]
-    else:
-        selected_dirs = [root_dir]
-
     if is_val:
-        tar_paths = []
-        rng = random.Random(42)
-        for d in selected_dirs:
-            subdirs = sorted([s for s in os.listdir(d) if os.path.isdir(os.path.join(d, s))]) if mix_selected is None else [d]
-            for subdir_path in (subdirs if mix_selected is None else [d]):
-                if mix_selected is None:
-                    subdir_path = os.path.join(d, subdir_path)
-                tar_files = sorted(glob.glob(os.path.join(subdir_path, "*.tar")))
-                if len(tar_files) == 0:
-                    continue
-                selected_tars = rng.sample(tar_files, min(val_tar_count, len(tar_files)))
-                tar_paths.extend(selected_tars)
+        tar_paths = _select_validation_tar_paths(root_dir, mix_selected=mix_selected, val_tar_count=val_tar_count)
+        if len(tar_paths) == 0:
+            raise FileNotFoundError("No .tar files found in given root_dir")
+        tar_paths = _get_local_validation_tar_paths(tar_paths)
+        explicit_length = _get_validation_explicit_length(tar_paths, batch_size, val_samples_per_tar)
     else:
+        if mix_selected is not None:
+            selected_dirs = [os.path.join(root_dir, m) for m in mix_selected]
+        else:
+            selected_dirs = [root_dir]
         tar_paths = []
         for d in selected_dirs:
             tar_paths.extend(glob.glob(os.path.join(d, "**", "*.tar"), recursive=True))
@@ -170,6 +210,7 @@ def create_wds_dataloader(
             n = max(1, int(len(tar_paths) * data_ratio))
             tar_paths = rng.sample(tar_paths, n)
         random.shuffle(tar_paths)
+        explicit_length = None
 
     if len(tar_paths) == 0:
         raise FileNotFoundError("No .tar files found in given root_dir")
@@ -186,7 +227,6 @@ def create_wds_dataloader(
     else:
         pipeline = [
             wds.SimpleShardList(tar_paths),
-            wds.split_by_node,
             wds.split_by_worker,
             wds.tarfile_to_samples(handler=wds.warn_and_continue),
             wds.shuffle(shuffle_buffer),
@@ -205,6 +245,7 @@ def create_wds_dataloader(
         persistent_workers=persistent_workers,
         drop_last=drop_last,
     )
+    loader.explicit_length = explicit_length
 
     return loader
 
@@ -270,6 +311,7 @@ class WDSDataModule(pl.LightningDataModule):
             is_val=True,
             mix_selected=self.mix_selected,
             val_tar_count=self.val_tar_count,
+            val_samples_per_tar=self.val_samples_per_tar,
         )
 
     def test_dataloader(self):

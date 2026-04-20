@@ -697,7 +697,7 @@ class DDPM(pl.LightningModule):
         logger=True,
         on_step=False,
         on_epoch=True,
-        sync_dist=True,
+        sync_dist=False,
         batch_size=batch_size,
         )
 
