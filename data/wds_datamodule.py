@@ -24,18 +24,16 @@ def _load_wav_bytes(buf: bytes):
     return t, sr
 
 
-def _get_distributed_rank_world_size():
+def _get_validation_world_size():
     if torch.distributed.is_available() and torch.distributed.is_initialized():
-        return torch.distributed.get_rank(), torch.distributed.get_world_size()
+        return max(torch.distributed.get_world_size(), 1)
     try:
-        rank = int(os.environ.get("RANK", "0"))
+        world_size = int(os.environ.get("WORLD_SIZE", "0"))
     except ValueError:
-        rank = 0
-    try:
-        world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    except ValueError:
-        world_size = 1
-    return rank, max(world_size, 1)
+        world_size = 0
+    if world_size > 0:
+        return world_size
+    return max(torch.cuda.device_count(), 1)
 
 
 def _select_validation_tar_paths(root_dir: str, mix_selected: list = None, val_tar_count: int = 2):
@@ -59,15 +57,11 @@ def _select_validation_tar_paths(root_dir: str, mix_selected: list = None, val_t
     return tar_paths
 
 
-def _get_local_validation_tar_paths(tar_paths: List[str]):
-    rank, world_size = _get_distributed_rank_world_size()
-    return tar_paths[rank::world_size]
-
-
-def _get_validation_explicit_length(local_tar_paths: List[str], batch_size: int, val_samples_per_tar: int = None):
+def _get_validation_explicit_length(tar_paths: List[str], batch_size: int, val_samples_per_tar: int = None):
     if val_samples_per_tar is None:
         return None
-    return math.ceil(len(local_tar_paths) * val_samples_per_tar / batch_size)
+    local_tar_count = math.ceil(len(tar_paths) / _get_validation_world_size())
+    return math.ceil(local_tar_count * val_samples_per_tar / batch_size)
 
 
 def decode_sample_to_tensors(sample: dict, target_sr: int):
@@ -194,7 +188,6 @@ def create_wds_dataloader(
         tar_paths = _select_validation_tar_paths(root_dir, mix_selected=mix_selected, val_tar_count=val_tar_count)
         if len(tar_paths) == 0:
             raise FileNotFoundError("No .tar files found in given root_dir")
-        tar_paths = _get_local_validation_tar_paths(tar_paths)
         explicit_length = _get_validation_explicit_length(tar_paths, batch_size, val_samples_per_tar)
     else:
         if mix_selected is not None:
@@ -227,6 +220,7 @@ def create_wds_dataloader(
     else:
         pipeline = [
             wds.SimpleShardList(tar_paths),
+            wds.split_by_node,
             wds.split_by_worker,
             wds.tarfile_to_samples(handler=wds.warn_and_continue),
             wds.shuffle(shuffle_buffer),
