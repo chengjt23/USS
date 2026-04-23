@@ -1,1 +1,13 @@
 bigvgan/g_01000000
+*.pyc
+*.txt
+*.wandb
+*.ckpt
+model_logs/*
+*.pth
+*.wav
+*.tar
+*.pt
+json
+*.json
+*.png
