@@ -62,6 +62,14 @@ class FlanT5HiddenState(nn.Module):
 
     def encode_text(self, prompt):
         device = self.model.device
+        if isinstance(prompt, str):
+            prompt = [[prompt]]
+        elif isinstance(prompt, (list, tuple)) and len(prompt) > 0 and isinstance(prompt[0], str):
+            if self.input_caption:
+                prompt = [list(prompt)]
+            else:
+                prompt = [[text] for text in prompt]
+
         n_gen = len(prompt)
         if n_gen == 1 and self.input_caption is False:
             raise ValueError("n_gen==1 but input_caption is False")
